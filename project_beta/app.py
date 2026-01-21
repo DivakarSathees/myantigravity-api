@@ -15,7 +15,7 @@ def is_prime(n):
     return True
 
 if __name__ == '__main__':
-    limit = 100
+    limit = 50
     primes = [str(n) for n in range(2, limit + 1) if is_prime(n)]
     print(f"Prime numbers up to {limit}:")
     print(', '.join(primes))

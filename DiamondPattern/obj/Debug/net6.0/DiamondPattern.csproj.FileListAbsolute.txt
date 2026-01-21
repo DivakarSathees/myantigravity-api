@@ -1,0 +1,15 @@
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/bin/Debug/net6.0/DiamondPattern
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/bin/Debug/net6.0/DiamondPattern.deps.json
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/bin/Debug/net6.0/DiamondPattern.runtimeconfig.json
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/bin/Debug/net6.0/DiamondPattern.dll
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/bin/Debug/net6.0/DiamondPattern.pdb
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.csproj.AssemblyReference.cache
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.GeneratedMSBuildEditorConfig.editorconfig
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.AssemblyInfoInputs.cache
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.AssemblyInfo.cs
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.csproj.CoreCompileInputs.cache
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.dll
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/refint/DiamondPattern.dll
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.pdb
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/DiamondPattern.genruntimeconfig.cache
+/Users/divakar/Desktop/my-antigravity/DiamondPattern/obj/Debug/net6.0/ref/DiamondPattern.dll

@@ -1,0 +1,15 @@
+/Users/divakar/Desktop/my-antigravity/pacman/bin/Debug/net6.0/pacman
+/Users/divakar/Desktop/my-antigravity/pacman/bin/Debug/net6.0/pacman.deps.json
+/Users/divakar/Desktop/my-antigravity/pacman/bin/Debug/net6.0/pacman.runtimeconfig.json
+/Users/divakar/Desktop/my-antigravity/pacman/bin/Debug/net6.0/pacman.dll
+/Users/divakar/Desktop/my-antigravity/pacman/bin/Debug/net6.0/pacman.pdb
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.csproj.AssemblyReference.cache
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.GeneratedMSBuildEditorConfig.editorconfig
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.AssemblyInfoInputs.cache
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.AssemblyInfo.cs
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.csproj.CoreCompileInputs.cache
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.dll
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/refint/pacman.dll
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.pdb
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/pacman.genruntimeconfig.cache
+/Users/divakar/Desktop/my-antigravity/pacman/obj/Debug/net6.0/ref/pacman.dll
