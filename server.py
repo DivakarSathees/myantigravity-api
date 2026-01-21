@@ -13,6 +13,11 @@ from utils import broadcast_log, connected_clients, pending_changes, broadcast_f
 import os
 from datetime import datetime
 
+# Debug: Log when pending_changes is accessed
+def debug_pending_changes():
+    print(f"📊 Current pending changes: {list(pending_changes.keys())}")
+    return pending_changes
+
 app = FastAPI()
 
 # Allow VS Code (which runs on a different port) to talk to this server
@@ -222,6 +227,22 @@ async def delete_session(session_id: str):
         del chat_sessions[session_id]
         return {"ok": True, "message": f"Session {session_id} deleted"}
     return {"ok": False, "error": "Session not found"}
+
+@app.get("/get-pending-change/{change_id}")
+async def get_pending_change(change_id: str):
+    """Get details of a pending file change"""
+    print(f"🔍 Looking for pending change: {change_id}")
+    print(f"📊 Available changes: {list(pending_changes.keys())}")
+    
+    if change_id not in pending_changes:
+        print(f"❌ Change {change_id} not found in pending_changes")
+        return {"ok": False, "error": f"Change not found. Available: {list(pending_changes.keys())}"}
+    
+    print(f"✅ Found change {change_id}")
+    return {
+        "ok": True,
+        "change": pending_changes[change_id]
+    }
 
 class FileChangeApproval(BaseModel):
     change_id: str
