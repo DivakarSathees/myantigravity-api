@@ -28,6 +28,7 @@ namespace ChessApp
         public Rook(Color color) : base(color) { }
         public override string Symbol => WhiteOrBlack("♖", "♜");
     }
+    
 
     public class Knight : Piece
     {

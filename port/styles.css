@@ -1,0 +1,58 @@
+/* Simple responsive portfolio styles */
+:root{
+  --bg:#0f1724;
+  --card:#0b1220;
+  --muted:#94a3b8;
+  --accent:#06b6d4;
+  --white:#f8fafc;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans",sans-serif;
+  background:linear-gradient(180deg,#071024 0%, #0b1220 100%);
+  color:var(--white);
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+}
+.container{max-width:1000px;margin:0 auto;padding:1rem}
+.site-header{background:transparent;padding:0.5rem 0;position:sticky;top:0;z-index:20}
+.header-inner{display:flex;align-items:center;justify-content:space-between}
+.logo{margin:0;font-size:1.25rem}
+.primary-nav ul{list-style:none;margin:0;padding:0;display:flex;gap:1rem}
+.primary-nav a{color:var(--white);text-decoration:none;font-weight:600}
+.nav-toggle{display:none;background:transparent;border:0;color:var(--white);font-size:1.25rem}
+.hero{padding:4rem 0;text-align:center}
+.hero-inner h2{font-size:2rem;margin:0 0 0.5rem}
+.hero-inner p{color:var(--muted);margin:0 0 1rem}
+.btn{background:var(--accent);color:#022;display:inline-block;padding:0.6rem 1rem;border-radius:6px;text-decoration:none;font-weight:700}
+.about{padding:2rem 0}
+.projects{padding:2rem 0}
+.projects-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem}
+.project-card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.12));padding:0;border-radius:8px;overflow:hidden}
+.project-card img{width:100%;height:auto;display:block}
+.project-card h3{margin:0.5rem 0;padding:0 0.75rem}
+.project-card p{padding:0 0.75rem;color:var(--muted);margin:0 0 0.75rem}
+.project-link{display:inline-block;margin:0 0 0.75rem 0.75rem;color:var(--accent)}
+.contact{padding:2rem 0}
+.contact-form{display:grid;gap:0.75rem;max-width:600px}
+.contact-form label{display:block}
+.contact-form span{display:block;margin-bottom:0.25rem;color:var(--muted)}
+.contact-form input,.contact-form textarea{width:100%;padding:0.6rem;border-radius:6px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:var(--white)}
+.form-actions{display:flex;gap:1rem;align-items:center}
+.form-msg{color:#86efac}
+.site-footer{border-top:1px solid rgba(255,255,255,0.03);padding:1rem 0;text-align:center;color:var(--muted);font-size:0.95rem}
+
+/* Responsive */
+@media (max-width:900px){
+  .projects-grid{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:640px){
+  .primary-nav{position:absolute;top:60px;left:0;right:0;background:linear-gradient(180deg,rgba(2,6,23,0.95),rgba(2,6,23,0.98));display:none}
+  .primary-nav[aria-hidden="false"]{display:block}
+  .primary-nav ul{flex-direction:column;padding:1rem}
+  .nav-toggle{display:block}
+  .projects-grid{grid-template-columns:1fr}
+  .hero-inner h2{font-size:1.5rem}
+}

@@ -12,6 +12,19 @@ pending_changes: Dict[str, dict] = {}
 # Queue for file change notifications (to be sent when event loop is available)
 file_change_queue = []
 
+# Current workspace path from VS Code (set by server.py, used by brain.py)
+current_workspace_path: str = None
+
+def set_workspace_path(path: str):
+    """Set the current workspace path"""
+    global current_workspace_path
+    current_workspace_path = path
+    print(f"📂 Workspace path set to: {path}")
+
+def get_workspace_path() -> str:
+    """Get the current workspace path"""
+    return current_workspace_path
+
 async def broadcast_log(message: str):
     """Broadcast a log message to all connected WebSocket clients."""
     if not connected_clients:

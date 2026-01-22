@@ -10,8 +10,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-# Import broadcast_log from utils
-from utils import broadcast_log
+# Import broadcast_log and workspace path from utils
+from utils import broadcast_log, get_workspace_path as _get_workspace_path
 
 # -------------------------------------------------
 # 1. Define Tools
@@ -31,6 +31,13 @@ from utils import broadcast_log
 #     except Exception as e:
 #         return f"Error: {str(e)}"
 
+def get_workspace_path():
+    """Get the current workspace path from utils (set by server.py)"""
+    workspace = _get_workspace_path()
+    if workspace and os.path.exists(workspace):
+        return workspace
+    return os.getcwd()
+
 @tool
 async def execute_terminal(command: str):
     """
@@ -44,13 +51,17 @@ async def execute_terminal(command: str):
     
     The agent must THINK and PLAN before calling this tool.
     """
+    # Get workspace path from VS Code
+    workspace_path = get_workspace_path()
+    
     await broadcast_log(f"▶️ Executing: {command}")
+    await broadcast_log(f"📂 In directory: {workspace_path}")
     
     process = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=os.getcwd()
+        cwd=workspace_path
     )
 
     stdout_lines = []
@@ -123,6 +134,11 @@ def manage_file(path: str, content: str = None, action: str = "write"):
     Returns: Success message for write, file contents for read, or error message
     """
     try:
+        # Resolve path relative to workspace
+        workspace_path = get_workspace_path()
+        if not os.path.isabs(path):
+            path = os.path.join(workspace_path, path)
+        
         if action == "write":
             if content is None:
                 return "Error: content parameter is required for write action"
@@ -202,9 +218,10 @@ def find_file(filename: str, search_dir: str = "."):
     """
     import glob
     
-    # Make search_dir absolute if not already
+    # Make search_dir absolute relative to workspace
+    workspace_path = get_workspace_path()
     if not os.path.isabs(search_dir):
-        search_dir = os.path.abspath(search_dir)
+        search_dir = os.path.join(workspace_path, search_dir) if search_dir != "." else workspace_path
     
     # Search for the file recursively
     pattern = os.path.join(search_dir, "**", filename)

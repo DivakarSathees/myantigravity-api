@@ -9,7 +9,7 @@ from typing import Dict, List
 from uuid import uuid4
 
 # Import shared utilities
-from utils import broadcast_log, connected_clients, pending_changes, broadcast_file_change, process_file_change_queue
+from utils import broadcast_log, connected_clients, pending_changes, broadcast_file_change, process_file_change_queue, set_workspace_path
 import os
 from datetime import datetime
 
@@ -50,6 +50,7 @@ def get_or_create_session(session_id: str = None):
 class ChatRequest(BaseModel):
     message: str
     session_id: str = None  # Optional session ID for maintaining history
+    workspace_path: str = None  # VS Code workspace folder path
 
 # @app.post("/chat")
 # async def chat(request: ChatRequest):
@@ -70,6 +71,11 @@ class ChatRequest(BaseModel):
 async def chat(request: ChatRequest):
     # Get or create session
     session_id, session = get_or_create_session(request.session_id)
+    
+    # Update workspace path if provided (stored in utils for brain.py to access)
+    if request.workspace_path:
+        set_workspace_path(request.workspace_path)
+        await broadcast_log(f"📁 Working in: {request.workspace_path}")
     
     # Add user message to history
     session["messages"].append(HumanMessage(content=request.message))
