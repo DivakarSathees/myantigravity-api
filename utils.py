@@ -15,6 +15,13 @@ file_change_queue = []
 # Current workspace path from VS Code (set by server.py, used by brain.py)
 current_workspace_path: str = None
 
+# Track running processes for interactive input and kill support
+running_processes: Dict[str, dict] = {}
+
+# Track current task progress
+current_tasks: Dict[str, dict] = {}
+task_counter = 0
+
 def set_workspace_path(path: str):
     """Set the current workspace path"""
     global current_workspace_path
@@ -113,3 +120,100 @@ async def process_file_change_queue():
         notification = file_change_queue.pop(0)
         print(f"📤 Processing queued change: {notification['change_id']}")
         await broadcast_file_change(notification["change_id"])
+
+# =============================================
+# Progress/Task Tracking System
+# =============================================
+
+async def broadcast_progress(action: str, task_id: str = None, task_name: str = None, status: str = None, details: str = None):
+    """
+    Broadcast progress updates to all connected clients.
+    
+    Actions:
+    - 'start_session': Start a new progress session (clears old tasks)
+    - 'add_task': Add a new task to the list
+    - 'update_task': Update task status (pending, in_progress, completed, error)
+    - 'end_session': End the progress session
+    
+    Status values: pending, in_progress, completed, error
+    """
+    global task_counter, current_tasks
+    
+    if action == 'start_session':
+        current_tasks = {}
+        task_counter = 0
+    
+    if action == 'add_task' and task_name:
+        task_counter += 1
+        task_id = f"task_{task_counter}"
+        current_tasks[task_id] = {
+            "id": task_id,
+            "name": task_name,
+            "status": "pending",
+            "details": details or ""
+        }
+    
+    if action == 'update_task' and task_id and task_id in current_tasks:
+        if status:
+            current_tasks[task_id]["status"] = status
+        if details:
+            current_tasks[task_id]["details"] = details
+    
+    # Broadcast to all clients
+    message = {
+        "type": "progress",
+        "action": action,
+        "task_id": task_id,
+        "task_name": task_name,
+        "status": status,
+        "details": details,
+        "tasks": list(current_tasks.values())
+    }
+    
+    disconnected = set()
+    for ws in connected_clients:
+        try:
+            await ws.send_json(message)
+        except Exception as e:
+            print(f"❌ Failed to send progress to client: {e}")
+            disconnected.add(ws)
+    
+    for ws in disconnected:
+        connected_clients.discard(ws)
+
+
+async def add_progress_task(name: str, details: str = "") -> str:
+    """Add a task and return its ID"""
+    global task_counter, current_tasks
+    task_counter += 1
+    task_id = f"task_{task_counter}"
+    current_tasks[task_id] = {
+        "id": task_id,
+        "name": name,
+        "status": "in_progress",
+        "details": details
+    }
+    await broadcast_progress("add_task", task_id, name, "in_progress", details)
+    return task_id
+
+
+async def update_progress_task(task_id: str, status: str, details: str = None):
+    """Update a task's status"""
+    if task_id in current_tasks:
+        current_tasks[task_id]["status"] = status
+        if details:
+            current_tasks[task_id]["details"] = details
+        await broadcast_progress("update_task", task_id, None, status, details)
+
+
+async def start_progress_session():
+    """Start a new progress tracking session"""
+    global current_tasks, task_counter
+    current_tasks = {}
+    task_counter = 0
+    await broadcast_progress("start_session")
+
+
+async def end_progress_session():
+    """End the current progress session"""
+    await broadcast_progress("end_session")

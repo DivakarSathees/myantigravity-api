@@ -9,8 +9,13 @@ from typing import Dict, List
 from uuid import uuid4
 
 # Import shared utilities
-from utils import broadcast_log, connected_clients, pending_changes, broadcast_file_change, process_file_change_queue, set_workspace_path
+from utils import (
+    broadcast_log, connected_clients, pending_changes, broadcast_file_change, 
+    process_file_change_queue, set_workspace_path, running_processes,
+    start_progress_session, end_progress_session, add_progress_task, update_progress_task
+)
 import os
+import signal
 from datetime import datetime
 
 # Debug: Log when pending_changes is accessed
@@ -77,6 +82,12 @@ async def chat(request: ChatRequest):
         set_workspace_path(request.workspace_path)
         await broadcast_log(f"📁 Working in: {request.workspace_path}")
     
+    # Start progress tracking session
+    await start_progress_session()
+    
+    # Add initial task
+    analyze_task = await add_progress_task("Analyzing request", "Understanding what you need...")
+    
     # Add user message to history
     session["messages"].append(HumanMessage(content=request.message))
     session["updated_at"] = datetime.now().isoformat()
@@ -86,10 +97,16 @@ async def chat(request: ChatRequest):
         # Use first 50 chars of message as title
         session["title"] = request.message[:50] + ("..." if len(request.message) > 50 else "")
     
+    await update_progress_task(analyze_task, "completed", "Request analyzed")
+    
     # Create inputs with full conversation history and recursion limit
     inputs = {"messages": session["messages"].copy()}
     config = {"recursion_limit": 50}  # Prevent recursion errors
     final_response = ""
+    
+    # Track current task for updates
+    current_task_id = await add_progress_task("Processing", "Agent is thinking...")
+    tool_count = 0
 
     async for output in agent_app.astream(inputs, config=config):
         for key, value in output.items():
@@ -99,12 +116,52 @@ async def chat(request: ChatRequest):
                 msg = value["messages"][-1].content
                 await broadcast_log(f"🤖 Agent: {msg}")
                 final_response = msg
+                
+                # Update progress based on message content
+                if "thinking" in msg.lower() or "planning" in msg.lower():
+                    await update_progress_task(current_task_id, "in_progress", "Planning approach...")
+                elif "reading" in msg.lower() or "analyzing" in msg.lower():
+                    await update_progress_task(current_task_id, "in_progress", "Analyzing files...")
+                elif "should i proceed" in msg.lower() or "(yes/no)" in msg.lower():
+                    await update_progress_task(current_task_id, "completed", "Waiting for confirmation")
+                    current_task_id = await add_progress_task("Awaiting confirmation", "Please confirm the action")
 
             # Stream tool execution
             if key == "action":
+                tool_count += 1
+                tool_messages = value.get("messages", [])
+                
+                # Get tool name from the message
+                tool_name = "Tool"
+                tool_result = ""
+                if tool_messages:
+                    last_msg = tool_messages[-1]
+                    if hasattr(last_msg, 'name'):
+                        tool_name = last_msg.name
+                    if hasattr(last_msg, 'content'):
+                        tool_result = str(last_msg.content)[:100]
+                
+                await update_progress_task(current_task_id, "completed", f"Completed: {tool_name}")
+                
+                # Create new task for next action
+                if "execute_terminal" in str(tool_name):
+                    current_task_id = await add_progress_task("Running command", "Executing terminal command...")
+                elif "manage_file" in str(tool_name):
+                    current_task_id = await add_progress_task("File operation", "Managing files...")
+                elif "find_file" in str(tool_name):
+                    current_task_id = await add_progress_task("Searching files", "Looking for files...")
+                else:
+                    current_task_id = await add_progress_task("Processing", "Continuing...")
+                
                 await broadcast_log("⚙️ Tool executed")
                 # Process any queued file changes
                 await process_file_change_queue()
+
+    # Mark final task as complete
+    await update_progress_task(current_task_id, "completed", "Done")
+    
+    # End progress session
+    await end_progress_session()
 
     # Add agent response to history
     if final_response:
@@ -332,6 +389,225 @@ async def get_file_content(path: str):
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+# =============================================
+# Process Control Endpoints (Input & Kill)
+# =============================================
+
+class ProcessInputRequest(BaseModel):
+    input_text: str
+
+@app.post("/send-input/{process_id}")
+async def send_input_to_process(process_id: str, request: ProcessInputRequest):
+    """Send input to a running process (for interactive commands)"""
+    try:
+        if process_id not in running_processes:
+            return {"ok": False, "message": f"Process {process_id} not found or already finished"}
+        
+        process_info = running_processes[process_id]
+        process = process_info["process"]
+        
+        if process.stdin is None:
+            return {"ok": False, "message": "Process does not support stdin input"}
+        
+        if process.returncode is not None:
+            return {"ok": False, "message": "Process has already finished"}
+        
+        # Send input with newline
+        input_text = request.input_text
+        if not input_text.endswith('\n'):
+            input_text += '\n'
+        
+        process.stdin.write(input_text.encode())
+        await process.stdin.drain()
+        
+        await broadcast_log(f"📥 Input sent: {request.input_text}")
+        return {"ok": True, "message": "Input sent successfully"}
+    except Exception as e:
+        await broadcast_log(f"❌ Error sending input: {e}")
+        return {"ok": False, "message": str(e)}
+
+@app.post("/kill-process/{process_id}")
+async def kill_process(process_id: str):
+    """Kill a running process (Ctrl+C equivalent)"""
+    try:
+        if process_id not in running_processes:
+            return {"ok": False, "message": f"Process {process_id} not found or already finished"}
+        
+        process_info = running_processes[process_id]
+        process = process_info["process"]
+        command = process_info["command"]
+        
+        if process.returncode is not None:
+            # Already finished
+            if process_id in running_processes:
+                del running_processes[process_id]
+            return {"ok": True, "message": "Process already finished"}
+        
+        # Send SIGINT (Ctrl+C) first for graceful termination
+        try:
+            process.send_signal(signal.SIGINT)
+            await broadcast_log(f"🛑 Sent Ctrl+C to process {process_id}")
+            
+            # Wait briefly for graceful shutdown
+            await asyncio.sleep(0.5)
+            
+            # If still running, force kill
+            if process.returncode is None:
+                process.kill()
+                await broadcast_log(f"⚠️ Force killed process {process_id}")
+        except ProcessLookupError:
+            pass  # Process already terminated
+        
+        # Clean up
+        if process_id in running_processes:
+            del running_processes[process_id]
+        
+        await broadcast_log(f"✅ Process terminated: {command[:50]}...")
+        return {"ok": True, "message": "Process terminated"}
+    except Exception as e:
+        await broadcast_log(f"❌ Error killing process: {e}")
+        return {"ok": False, "message": str(e)}
+
+@app.get("/running-processes")
+async def get_running_processes():
+    """Get list of currently running processes"""
+    return {
+        "ok": True,
+        "processes": [
+            {"process_id": pid, "command": info["command"]}
+            for pid, info in running_processes.items()
+            if info["process"].returncode is None
+        ]
+    }
+
+# =============================================
+# File Browser Endpoints (for @ mentions)
+# =============================================
+
+class FileListRequest(BaseModel):
+    path: str = None  # Optional path to list from
+    search: str = None  # Optional search filter
+    workspace_path: str = None  # Workspace path from VS Code
+
+@app.post("/list-workspace-files")
+async def list_workspace_files(request: FileListRequest = None):
+    """List files in the workspace for @ mention picker"""
+    from utils import get_workspace_path, set_workspace_path
+    import fnmatch
+    
+    # Use workspace from request if provided, otherwise try stored one
+    workspace = None
+    if request and request.workspace_path:
+        workspace = request.workspace_path
+        set_workspace_path(workspace)  # Also store it for future use
+    else:
+        workspace = get_workspace_path()
+    
+    if not workspace:
+        return {"ok": False, "message": "No workspace path set"}
+    
+    search_filter = request.search.lower() if request and request.search else None
+    
+    files = []
+    ignore_patterns = [
+        '*.pyc', '__pycache__', '.git', 'node_modules', '.vscode',
+        'venv', '.env', '*.egg-info', '.DS_Store', '*.log',
+        'dist', 'build', '.next', '.cache', 'coverage'
+    ]
+    
+    try:
+        for root, dirs, filenames in os.walk(workspace):
+            # Filter out ignored directories
+            dirs[:] = [d for d in dirs if not any(
+                fnmatch.fnmatch(d, pattern) for pattern in ignore_patterns
+            )]
+            
+            for filename in filenames:
+                # Skip ignored files
+                if any(fnmatch.fnmatch(filename, pattern) for pattern in ignore_patterns):
+                    continue
+                
+                full_path = os.path.join(root, filename)
+                rel_path = os.path.relpath(full_path, workspace)
+                
+                # Apply search filter
+                if search_filter and search_filter not in rel_path.lower():
+                    continue
+                
+                # Get file info
+                try:
+                    stat = os.stat(full_path)
+                    files.append({
+                        "path": rel_path,
+                        "full_path": full_path,
+                        "name": filename,
+                        "size": stat.st_size,
+                        "is_directory": False
+                    })
+                except OSError:
+                    continue
+            
+            # Limit to prevent overwhelming UI
+            if len(files) > 100:
+                break
+        
+        # Sort by path
+        files.sort(key=lambda x: x["path"])
+        
+        return {"ok": True, "files": files[:100], "workspace": workspace}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+class ReadFileRequest(BaseModel):
+    path: str = None
+    workspace_path: str = None
+
+@app.post("/read-file-content")
+async def read_file_content(path: str = None, request: ReadFileRequest = None):
+    """Read file content for context"""
+    from utils import get_workspace_path, set_workspace_path
+    
+    # Get path from query param or request body
+    file_path = path or (request.path if request else None)
+    
+    if not file_path:
+        return {"ok": False, "message": "No file path provided"}
+    
+    # Use workspace from request if provided
+    workspace = None
+    if request and request.workspace_path:
+        workspace = request.workspace_path
+        set_workspace_path(workspace)
+    else:
+        workspace = get_workspace_path()
+    
+    if not workspace:
+        return {"ok": False, "message": "No workspace path set"}
+    
+    # Resolve full path
+    if not os.path.isabs(file_path):
+        full_path = os.path.join(workspace, file_path)
+    else:
+        full_path = file_path
+    
+    try:
+        if not os.path.exists(full_path):
+            return {"ok": False, "message": f"File not found: {file_path}"}
+        
+        with open(full_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        return {
+            "ok": True,
+            "path": file_path,
+            "content": content,
+            "size": len(content)
+        }
+    except UnicodeDecodeError:
+        return {"ok": False, "message": "Cannot read binary file"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
 # Updated execute_terminal tool to "broadcast" logs
 async def execute_terminal_stream(command: str, websocket: WebSocket):
     process = await asyncio.create_subprocess_shell(
@@ -347,7 +623,6 @@ async def execute_terminal_stream(command: str, websocket: WebSocket):
             break
         log_message = line.decode().strip()
         await broadcast_log(log_message)
-        # await websocket.send_json({"type": "log", "content": log_message})
     
     await process.wait()
 

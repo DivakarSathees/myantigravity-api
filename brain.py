@@ -10,8 +10,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-# Import broadcast_log and workspace path from utils
-from utils import broadcast_log, get_workspace_path as _get_workspace_path
+# Import broadcast_log, workspace path, and process tracking from utils
+from utils import broadcast_log, get_workspace_path as _get_workspace_path, running_processes
 
 # -------------------------------------------------
 # 1. Define Tools
@@ -42,6 +42,7 @@ def get_workspace_path():
 async def execute_terminal(command: str):
     """
     Executes a shell command and streams stdout/stderr to the UI.
+    Supports interactive input - use the input field in the terminal UI to send input.
     
     CRITICAL RULES:
     1. This tool should ONLY be called AFTER user confirmation
@@ -51,18 +52,34 @@ async def execute_terminal(command: str):
     
     The agent must THINK and PLAN before calling this tool.
     """
+    import uuid
+    process_id = str(uuid.uuid4())[:8]
+    
     # Get workspace path from VS Code
     workspace_path = get_workspace_path()
     
     await broadcast_log(f"▶️ Executing: {command}")
     await broadcast_log(f"📂 In directory: {workspace_path}")
+    await broadcast_log(f"🆔 Process ID: {process_id}")
     
+    # Create process with stdin support for interactive commands
     process = await asyncio.create_subprocess_shell(
         command,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=workspace_path
     )
+    
+    # Store process info for input/kill support
+    running_processes[process_id] = {
+        "process": process,
+        "command": command,
+        "workspace": workspace_path
+    }
+    
+    # Notify UI that process started (for showing input controls)
+    await broadcast_process_event("start", process_id, command)
 
     stdout_lines = []
     stderr_lines = []
@@ -70,31 +87,47 @@ async def execute_terminal(command: str):
     # Read stdout
     async def read_stdout():
         while True:
-            line = await process.stdout.readline()
-            if not line:
+            try:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                msg = line.decode().strip()
+                if msg:
+                    stdout_lines.append(msg)
+                    await broadcast_log(f"  {msg}")
+            except Exception:
                 break
-            msg = line.decode().strip()
-            if msg:
-                stdout_lines.append(msg)
-                await broadcast_log(f"  {msg}")
     
     # Read stderr
     async def read_stderr():
         while True:
-            line = await process.stderr.readline()
-            if not line:
+            try:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                msg = line.decode().strip()
+                if msg:
+                    stderr_lines.append(msg)
+                    await broadcast_log(f"  ❌ {msg}")
+            except Exception:
                 break
-            msg = line.decode().strip()
-            if msg:
-                stderr_lines.append(msg)
-                await broadcast_log(f"  ❌ {msg}")
     
     # Run both simultaneously
-    await asyncio.gather(read_stdout(), read_stderr())
-    await process.wait()
+    try:
+        await asyncio.gather(read_stdout(), read_stderr())
+        await process.wait()
+    except Exception as e:
+        await broadcast_log(f"⚠️ Process error: {e}")
+    
+    # Clean up process tracking
+    if process_id in running_processes:
+        del running_processes[process_id]
+    
+    # Notify UI that process ended
+    await broadcast_process_event("end", process_id, command)
     
     # Prepare result
-    exit_code = process.returncode
+    exit_code = process.returncode if process.returncode is not None else -1
     result = {
         "stdout": "\n".join(stdout_lines) if stdout_lines else "",
         "stderr": "\n".join(stderr_lines) if stderr_lines else "",
@@ -107,6 +140,9 @@ async def execute_terminal(command: str):
             return f"Command executed successfully.\nOutput:\n{result['stdout']}"
         else:
             return "Command executed successfully (no output produced)."
+    elif exit_code == -15 or exit_code == 130:  # SIGTERM or SIGINT
+        await broadcast_log(f"🛑 Command was terminated: {command}")
+        return "Command was terminated by user."
     else:
         await broadcast_log(f"❌ Command failed with exit code {exit_code}: {command}")
         error_msg = f"Command failed with exit code {exit_code}.\n"
@@ -115,6 +151,23 @@ async def execute_terminal(command: str):
         if stdout_lines:
             error_msg += f"Output:\n{result['stdout']}"
         return error_msg
+
+
+async def broadcast_process_event(event_type: str, process_id: str, command: str):
+    """Broadcast process start/end events to UI"""
+    from utils import connected_clients
+    
+    message = {
+        "type": f"process_{event_type}",
+        "process_id": process_id,
+        "command": command
+    }
+    
+    for ws in connected_clients:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            pass
 
 
 
@@ -306,6 +359,69 @@ Before running ANY Python/script file, you MUST:
    - If multiple inputs: Use "echo -e 'val1\\nval2' | python3 script.py"
 4. **Then ask permission** to run with proper input handling
 
+🔗 CASCADING FILE CHANGES (CRITICAL!):
+After editing ANY file, you MUST:
+
+1. **Identify Related Files**:
+   - If editing a component: Check files that import/use it
+   - If editing an interface/type: Check all implementations
+   - If editing a config file: Check files that use those configs
+   - If editing a function: Check all callers of that function
+   - If editing package.json/requirements.txt: Note new dependencies
+
+2. **Analyze Impact**:
+   - Read each related file
+   - Check if changes are needed (imports, function calls, types, etc.)
+   - List what needs to be updated
+
+3. **Apply Cascading Changes**:
+   - Edit each affected file
+   - Explain: "📝 Also updating [file] because [reason]"
+   - Continue until all related files are consistent
+
+4. **Example Related Files by Type**:
+   - React component → Check parent components, routes, tests
+   - Python module → Check files with `from module import` or `import module`
+   - TypeScript interface → Check all files using that interface
+   - CSS/styles → Check components using those styles
+   - API endpoint → Check frontend calls, tests
+   - Database model → Check migrations, queries, API handlers
+
+🏗️ BUILD & RUN WORKFLOW (After File Changes):
+After completing file edits, ALWAYS:
+
+1. **Detect Project Type** (check for these files):
+   - package.json → Node.js/React/Vue project
+   - requirements.txt/setup.py → Python project
+   - Cargo.toml → Rust project
+   - go.mod → Go project
+   - pom.xml/build.gradle → Java project
+   - Makefile → Check make targets
+
+2. **Suggest Appropriate Build Command**:
+   - Node.js: `npm install && npm run build` or `npm start`
+   - Python: `pip install -r requirements.txt` then `python app.py`
+   - React: `npm install && npm start` or `npm run dev`
+   - TypeScript: `npm run compile` or `tsc`
+
+3. **Ask for Build/Run Approval**:
+   "✅ Files updated successfully!
+
+   📦 **Build Step Available:**
+   I can run: `[build command]`
+   
+   This will: [explain what the command does]
+   
+   Should I proceed with the build? (yes/no)"
+
+4. **On Build Errors - AUTO-FIX LOOP**:
+   If build/run fails:
+   a) **Analyze the error** - identify root cause
+   b) **Fix automatically** - edit the problematic file(s)
+   c) **Report**: "🔧 Fixed: [brief description of fix]"
+   d) **Ask to retry**: "Should I run the build again? (yes/no)"
+   e) **Repeat** until success or user cancels
+
 ⚙️ COMMAND EXECUTION WORKFLOW:
 1. **Think & Plan** (explain your approach)
 2. **Read file if executing script** (understand what it does)
@@ -314,16 +430,31 @@ Before running ANY Python/script file, you MUST:
 5. **Wait for "yes"**
 6. **THEN call execute_terminal** with proper command
 
-❌ ERROR HANDLING:
-- If command fails, ANALYZE the error
-- Determine root cause
-- If fixable code error:
-  1. Explain error briefly
-  2. Fix using manage_file
-  3. Ask: "Fixed! Should I rerun: `command`? (yes/no)"
-- If missing dependency:
-  1. Explain what's missing
-  2. Ask: "Should I install: `pip install package`? (yes/no)"
+❌ ERROR HANDLING & AUTO-FIX:
+When ANY command fails:
+
+1. **Parse the Error**:
+   - Syntax error → Identify file and line
+   - Import error → Identify missing module
+   - Type error → Identify type mismatch
+   - Build error → Identify failing file
+
+2. **Auto-Fix Without Asking**:
+   - Read the problematic file
+   - Apply the fix using manage_file
+   - Report: "🔧 Fixed [error type] in [file]"
+
+3. **Ask to Retry**:
+   "Fixed! Should I run `[command]` again? (yes/no)"
+
+4. **Common Error Fixes**:
+   - ModuleNotFoundError → `pip install [module]`
+   - SyntaxError → Fix the syntax in the file
+   - ImportError → Add missing import or install package
+   - TypeError → Fix type mismatch in code
+   - FileNotFoundError → Create the missing file
+   - NameError → Add missing variable/import
+   - npm ERR! → `npm install` missing deps
 
 📝 FILE OPERATIONS (No confirmation needed):
 - manage_file action="read" - proceed directly
@@ -334,54 +465,64 @@ Before running ANY Python/script file, you MUST:
 - ALWAYS think and plan first
 - ALWAYS read script files before executing
 - ALWAYS check for input requirements
+- ALWAYS check related files after editing
+- ALWAYS suggest build command after file changes
+- ALWAYS auto-fix errors and ask to retry
 - NEVER call execute_terminal until user confirms
 - NEVER run scripts blind without understanding them
+- NEVER leave related files inconsistent
 
-📚 EXAMPLE COMPLETE FLOW:
+📚 EXAMPLE: COMPLETE EDIT → BUILD → FIX FLOW:
 
-User: "Run calculator.py"
+User: "Add a new utility function to utils.py"
 
 You: "🤔 **Thinking & Planning:**
-- Task: Execute calculator.py script
-- Approach: First understand what the script does, then run it properly
-- Potential issues: May need input, may have dependencies
+- Task: Add new utility function
+- Approach: Add function, check for files using utils.py, suggest running tests
+- Related files to check: Any file importing from utils.py
 
-Let me read the file first to understand what it does..."
+Let me first read utils.py..."
 
-[Call manage_file("calculator.py", action="read")]
+[Read utils.py, add function]
 
-You: "📋 **Analysis:**
-The script:
-- Prompts for two numbers
-- Calculates their sum
-- Prints the result
+You: "✅ Added new function `calculate_total()` to utils.py
 
-**Input Requirements:**
-- First number (e.g., 5)
-- Second number (e.g., 10)
+🔍 **Checking Related Files...**
+Found 3 files that import from utils.py:
+- main.py
+- api/handlers.py
+- tests/test_utils.py
 
-What values would you like me to use for the two numbers?"
+Let me check if they need updates..."
 
-User: "Use 15 and 25"
+[Read and update related files as needed]
 
-You: "Perfect! I'll run the calculator with inputs 15 and 25.
+You: "📝 Updated related files:
+- tests/test_utils.py - Added test for new function
 
-Command: `echo -e '15\\n25' | python3 calculator.py`
+✅ All files updated!
 
-This will:
-1. Provide 15 as first input
-2. Provide 25 as second input
-3. Run the script with these values
+📦 **Build/Test Available:**
+I can run: `python -m pytest tests/`
 
-Should I proceed? (yes/no)"
+This will verify everything works correctly.
+
+Should I run the tests? (yes/no)"
 
 User: "yes"
 
-You: [Call execute_terminal("echo -e '15\\n25' | python3 calculator.py")]
+[Run tests, if error occurs:]
+
+You: "❌ Test failed: NameError in test_utils.py line 45
+
+🔧 **Auto-fixing...**
+The test was missing an import. Fixed!
+
+Should I run the tests again? (yes/no)"
 
 ---
 
-REMEMBER: Think → Plan → Read → Analyze → Ask → Execute
+REMEMBER: Think → Plan → Edit → Check Related → Build → Fix → Retry
 """
 
 llm = AzureChatOpenAI(
