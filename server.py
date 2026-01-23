@@ -12,7 +12,10 @@ from uuid import uuid4
 from utils import (
     broadcast_log, connected_clients, pending_changes, broadcast_file_change, 
     process_file_change_queue, set_workspace_path, running_processes,
-    start_progress_session, end_progress_session, add_progress_task, update_progress_task
+    start_progress_session, end_progress_session, add_progress_task, update_progress_task,
+    # New applied changes system
+    applied_changes, session_changes, process_applied_change_queue, 
+    clear_session_changes, update_change_status, get_all_session_changes, get_applied_change
 )
 import os
 import signal
@@ -154,8 +157,9 @@ async def chat(request: ChatRequest):
                     current_task_id = await add_progress_task("Processing", "Continuing...")
                 
                 await broadcast_log("⚙️ Tool executed")
-                # Process any queued file changes
+                # Process any queued file changes (both pending and applied)
                 await process_file_change_queue()
+                await process_applied_change_queue()
 
     # Mark final task as complete
     await update_progress_task(current_task_id, "completed", "Done")
@@ -191,6 +195,30 @@ async def chat(request: ChatRequest):
 async def test_log():
     await broadcast_log("🔥 Test log from FastAPI")
     return {"ok": True}
+
+@app.post("/test-file-change")
+async def test_file_change():
+    """Test endpoint to simulate a file change notification"""
+    from utils import store_applied_change, broadcast_applied_change, session_changes, applied_changes
+    
+    # Create a test change
+    test_change_id = store_applied_change(
+        file_path="/test/example.py",
+        old_content="# old content",
+        new_content="# new content\nprint('hello')",
+        diff="--- old\n+++ new\n-# old content\n+# new content\n+print('hello')",
+        is_new_file=False
+    )
+    
+    # Broadcast it directly
+    await broadcast_applied_change(test_change_id)
+    
+    return {
+        "ok": True, 
+        "change_id": test_change_id,
+        "session_changes_count": len(session_changes),
+        "applied_changes_count": len(applied_changes)
+    }
 
 
 @app.websocket("/ws/logs")
@@ -375,6 +403,172 @@ async def get_pending_changes():
             for change_id, change in pending_changes.items()
         ]
     }
+
+# =============================================
+# Applied File Changes Endpoints (New Workflow)
+# =============================================
+
+@app.get("/session-changes")
+async def get_session_changes():
+    """Get all file changes in current session (for sidebar)"""
+    changes = get_all_session_changes()
+    return {
+        "ok": True,
+        "changes": changes
+    }
+
+@app.get("/applied-change/{change_id}")
+async def get_applied_change_details(change_id: str):
+    """Get details of an applied file change"""
+    change = get_applied_change(change_id)
+    if not change:
+        return {"ok": False, "message": "Change not found"}
+    
+    return {
+        "ok": True,
+        "change": change
+    }
+
+class RevertChangeRequest(BaseModel):
+    change_id: str
+
+@app.post("/revert-change")
+async def revert_file_change(request: RevertChangeRequest):
+    """Revert an applied file change back to original content"""
+    change_id = request.change_id
+    change = get_applied_change(change_id)
+    
+    if not change:
+        return {"ok": False, "message": "Change not found"}
+    
+    if change["status"] == "reverted":
+        return {"ok": False, "message": "Change already reverted"}
+    
+    try:
+        file_path = change["file_path"]
+        
+        if change["is_new_file"]:
+            # Delete the new file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            await broadcast_log(f"🗑️ File deleted (reverted): {file_path}")
+        else:
+            # Restore original content
+            with open(file_path, "w") as f:
+                f.write(change["old_content"])
+            await broadcast_log(f"↩️ File reverted: {file_path}")
+        
+        # Update status
+        update_change_status(change_id, "reverted")
+        
+        # Broadcast update to all clients
+        await broadcast_session_changes_update()
+        
+        return {
+            "ok": True,
+            "message": f"Reverted: {file_path}",
+            "file_path": file_path
+        }
+    except Exception as e:
+        return {"ok": False, "message": f"Error reverting: {str(e)}"}
+
+@app.post("/accept-change")
+async def accept_file_change(request: RevertChangeRequest):
+    """Accept an applied change (just marks it as accepted, file already changed)"""
+    change_id = request.change_id
+    change = get_applied_change(change_id)
+    
+    if not change:
+        return {"ok": False, "message": "Change not found"}
+    
+    # Mark as accepted
+    update_change_status(change_id, "accepted")
+    
+    await broadcast_log(f"✅ Change accepted: {change['file_path']}")
+    
+    # Broadcast update
+    await broadcast_session_changes_update()
+    
+    return {
+        "ok": True,
+        "message": f"Accepted: {change['file_path']}",
+        "file_path": change["file_path"]
+    }
+
+@app.post("/revert-all-changes")
+async def revert_all_changes():
+    """Revert all applied changes in current session"""
+    changes = get_all_session_changes()
+    reverted = []
+    errors = []
+    
+    for change_info in changes:
+        if change_info["status"] == "applied":
+            change = get_applied_change(change_info["change_id"])
+            if change:
+                try:
+                    file_path = change["file_path"]
+                    if change["is_new_file"]:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                    else:
+                        with open(file_path, "w") as f:
+                            f.write(change["old_content"])
+                    
+                    update_change_status(change_info["change_id"], "reverted")
+                    reverted.append(file_path)
+                except Exception as e:
+                    errors.append(f"{file_path}: {str(e)}")
+    
+    await broadcast_log(f"↩️ Reverted {len(reverted)} files")
+    await broadcast_session_changes_update()
+    
+    return {
+        "ok": True,
+        "reverted": reverted,
+        "errors": errors,
+        "message": f"Reverted {len(reverted)} files"
+    }
+
+@app.post("/accept-all-changes")
+async def accept_all_changes():
+    """Accept all applied changes in current session"""
+    changes = get_all_session_changes()
+    accepted = []
+    
+    for change_info in changes:
+        if change_info["status"] == "applied":
+            update_change_status(change_info["change_id"], "accepted")
+            accepted.append(change_info["file_path"])
+    
+    await broadcast_log(f"✅ Accepted {len(accepted)} changes")
+    await broadcast_session_changes_update()
+    
+    return {
+        "ok": True,
+        "accepted": accepted,
+        "message": f"Accepted {len(accepted)} changes"
+    }
+
+@app.post("/clear-session-changes")
+async def clear_all_session_changes():
+    """Clear the session changes list"""
+    clear_session_changes()
+    await broadcast_session_changes_update()
+    return {"ok": True, "message": "Session changes cleared"}
+
+async def broadcast_session_changes_update():
+    """Broadcast updated session changes to all clients"""
+    changes = get_all_session_changes()
+    
+    for ws in connected_clients:
+        try:
+            await ws.send_json({
+                "type": "session_changes_update",
+                "changes": changes
+            })
+        except Exception:
+            pass
 
 @app.get("/get-file-content")
 async def get_file_content(path: str):
