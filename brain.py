@@ -57,6 +57,8 @@ async def execute_terminal(command: str):
     
     # Get workspace path from VS Code
     workspace_path = get_workspace_path()
+    # workspace_path = "/home/code/workspace"  # Forcing to default workspace for now
+
     
     await broadcast_log(f"▶️ Executing: {command}")
     await broadcast_log(f"📂 In directory: {workspace_path}")
