@@ -136,6 +136,15 @@ async def execute_terminal(command: str):
         "exit_code": exit_code
     }
     
+    # Track command execution for summary
+    try:
+        from server import track_command, get_current_session_id
+        session_id = get_current_session_id()
+        if session_id:
+            track_command(session_id, command, exit_code)
+    except Exception:
+        pass  # Don't fail if tracking fails
+    
     if exit_code == 0:
         await broadcast_log(f"✅ Command completed successfully: {command}")
         if stdout_lines:
@@ -147,7 +156,7 @@ async def execute_terminal(command: str):
         return "Command was terminated by user."
     else:
         await broadcast_log(f"❌ Command failed with exit code {exit_code}: {command}")
-        error_msg = f"Command failed with exit code {exit_code}.\n"
+        error_msg = f"Command failed with exit_code {exit_code}.\n"
         if stderr_lines:
             error_msg += f"Error:\n{result['stderr']}\n"
         if stdout_lines:
@@ -240,6 +249,15 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 
                 await broadcast_log(f"✅ Edited: {file_name}")
                 
+                # Track file change for summary
+                try:
+                    from server import track_file_change, get_current_session_id
+                    session_id = get_current_session_id()
+                    if session_id:
+                        track_file_change(session_id, path, "modified")
+                except Exception:
+                    pass
+                
                 return f"✅ File updated: {path}\n\n📝 Changes applied! You can view diff or revert in the sidebar.\n\nDiff preview:\n{diff_text[:500]}{'...' if len(diff_text) > 500 else ''}"
             
             else:
@@ -263,6 +281,15 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 await broadcast_applied_change(change_id)
                 
                 await broadcast_log(f"✅ Created: {file_name}")
+                
+                # Track file change for summary
+                try:
+                    from server import track_file_change, get_current_session_id
+                    session_id = get_current_session_id()
+                    if session_id:
+                        track_file_change(session_id, path, "created")
+                except Exception:
+                    pass
                 
                 preview = content[:300] + ("..." if len(content) > 300 else "")
                 return f"✅ File created: {path}\n\n📝 New file created! You can view or delete in the sidebar.\n\nPreview:\n{preview}"

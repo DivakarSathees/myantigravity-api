@@ -20,6 +20,133 @@ from utils import (
 import os
 import signal
 from datetime import datetime
+import re
+
+# Session tracking for markdown generation
+session_activities = {}  # session_id -> {files_changed: [], commands_run: [], request: str, response: str}
+current_session_id = None  # Track current active session
+
+def get_current_session_id():
+    """Get the current active session ID"""
+    return current_session_id
+
+def sanitize_filename(text: str) -> str:
+    """Convert text to a safe filename"""
+    # Remove or replace unsafe characters
+    text = re.sub(r'[^\w\s-]', '', text)
+    text = re.sub(r'[-\s]+', '_', text)
+    return text[:50]  # Limit length
+
+def create_request_summary_markdown(session_id: str, request_text: str, response_text: str, workspace_path: str = None):
+    """Create a markdown file documenting the request and changes made"""
+    try:
+        # Get session activities
+        activities = session_activities.get(session_id, {
+            'files_changed': [],
+            'commands_run': [],
+            'request': request_text,
+            'response': response_text
+        })
+        
+        # Create markdown content
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create filename from request
+        filename_base = sanitize_filename(request_text)
+        filename = f"{date_str}_{filename_base}.md"
+        
+        # Determine where to save
+        if workspace_path and os.path.exists(workspace_path):
+            summary_dir = os.path.join(workspace_path, ".neuralstack_logs")
+        else:
+            summary_dir = ".neuralstack_logs"
+        
+        os.makedirs(summary_dir, exist_ok=True)
+        filepath = os.path.join(summary_dir, filename)
+        
+        # Build markdown content
+        md_content = f"""# Request Summary
+
+**Date:** {timestamp}  
+**Session ID:** {session_id}
+
+---
+
+## 📝 User Request
+
+```
+{request_text}
+```
+
+---
+
+## 🤖 Agent Response
+
+{response_text}
+
+---
+
+## 📁 Files Changed
+
+"""
+        
+        if activities.get('files_changed'):
+            for file_change in activities['files_changed']:
+                action = file_change.get('action', 'modified')
+                path = file_change.get('path', 'unknown')
+                md_content += f"- **{action.upper()}**: `{path}`\n"
+        else:
+            md_content += "*No files were modified*\n"
+        
+        md_content += "\n---\n\n## 🖥️ Commands Executed\n\n"
+        
+        if activities.get('commands_run'):
+            for i, cmd in enumerate(activities['commands_run'], 1):
+                command = cmd.get('command', '')
+                exit_code = cmd.get('exit_code', 'N/A')
+                md_content += f"{i}. **Command:** `{command}`\n"
+                md_content += f"   - Exit Code: {exit_code}\n\n"
+        else:
+            md_content += "*No commands were executed*\n"
+        
+        md_content += "\n---\n\n## 📊 Summary\n\n"
+        md_content += f"- **Files Modified:** {len(activities.get('files_changed', []))}\n"
+        md_content += f"- **Commands Run:** {len(activities.get('commands_run', []))}\n"
+        md_content += f"- **Session:** {session_id[:8]}...\n"
+        
+        # Write to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(md_content)
+        
+        print(f"📄 Created summary: {filepath}")
+        return filepath
+    
+    except Exception as e:
+        print(f"❌ Error creating summary markdown: {e}")
+        return None
+
+def track_file_change(session_id: str, file_path: str, action: str = "modified"):
+    """Track a file change for the session"""
+    if session_id not in session_activities:
+        session_activities[session_id] = {'files_changed': [], 'commands_run': []}
+    
+    session_activities[session_id]['files_changed'].append({
+        'path': file_path,
+        'action': action,
+        'timestamp': datetime.now().isoformat()
+    })
+
+def track_command(session_id: str, command: str, exit_code: int = None):
+    """Track a command execution for the session"""
+    if session_id not in session_activities:
+        session_activities[session_id] = {'files_changed': [], 'commands_run': []}
+    
+    session_activities[session_id]['commands_run'].append({
+        'command': command,
+        'exit_code': exit_code,
+        'timestamp': datetime.now().isoformat()
+    })
 
 # Debug: Log when pending_changes is accessed
 def debug_pending_changes():
@@ -77,8 +204,13 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
+    global current_session_id
+    
     # Get or create session
     session_id, session = get_or_create_session(request.session_id)
+    
+    # Set current session ID for tracking
+    current_session_id = session_id
     
     # Update workspace path if provided (stored in utils for brain.py to access)
     if request.workspace_path:
@@ -172,10 +304,22 @@ async def chat(request: ChatRequest):
         session["messages"].append(AIMessage(content=final_response))
         session["updated_at"] = datetime.now().isoformat()
     
+    # Create markdown summary of this request
+    summary_path = create_request_summary_markdown(
+        session_id=session_id,
+        request_text=request.message,
+        response_text=final_response,
+        workspace_path=request.workspace_path
+    )
+    
+    if summary_path:
+        await broadcast_log(f"📄 Summary saved: {os.path.basename(summary_path)}")
+    
     return {
         "response": final_response,
         "session_id": session_id,
-        "session_title": session["title"]
+        "session_title": session["title"],
+        "summary_file": summary_path
     }
 
 
