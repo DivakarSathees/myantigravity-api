@@ -185,7 +185,8 @@ def get_or_create_session(session_id: str = None):
 class ChatRequest(BaseModel):
     message: str
     session_id: str = None  # Optional session ID for maintaining history
-    workspace_path: str = None  # VS Code workspace folder path
+    workspace_path: str = None  # VS Code workspace folder path (or scope folder when scope_path set)
+    scope_path: str = None  # When set, use this folder as workspace for this request (read/list/run in this folder)
 
 # @app.post("/chat")
 # async def chat(request: ChatRequest):
@@ -212,10 +213,14 @@ async def chat(request: ChatRequest):
     # Set current session ID for tracking
     current_session_id = session_id
     
-    # Update workspace path if provided (stored in utils for brain.py to access)
-    if request.workspace_path:
-        set_workspace_path(request.workspace_path)
-        await broadcast_log(f"📁 Working in: {request.workspace_path}")
+    # Use scope_path (folder selected for / prompt) as workspace for this request so agent reads/runs in that folder
+    effective_workspace = request.scope_path or request.workspace_path
+    if effective_workspace:
+        set_workspace_path(effective_workspace)
+        if request.scope_path:
+            await broadcast_log(f"📁 Working in selected folder: {request.scope_path}")
+        else:
+            await broadcast_log(f"📁 Working in: {request.workspace_path}")
     
     # Start progress tracking session
     await start_progress_session()
@@ -895,6 +900,64 @@ async def list_workspace_files(request: FileListRequest = None):
         return {"ok": True, "files": files[:100], "workspace": workspace}
     except Exception as e:
         return {"ok": False, "message": str(e)}
+
+
+class FolderListRequest(BaseModel):
+    workspace_path: str = None
+    search: str = None  # Optional filter
+
+@app.post("/list-workspace-folders")
+async def list_workspace_folders(request: FolderListRequest = None):
+    """List folders in the workspace for / prompt folder picker (same workspace as @ files)"""
+    from utils import get_workspace_path, set_workspace_path
+    import fnmatch
+
+    workspace = None
+    if request and request.workspace_path:
+        workspace = request.workspace_path
+        set_workspace_path(workspace)
+    else:
+        workspace = get_workspace_path()
+
+    if not workspace:
+        return {"ok": False, "message": "No workspace path set"}
+
+    search_filter = request.search.lower() if request and request.search else None
+    ignore_patterns = [
+        '__pycache__', '.git', 'node_modules', '.vscode',
+        'venv', '.env', '*.egg-info', '.DS_Store',
+        'dist', 'build', '.next', '.cache', 'coverage'
+    ]
+    folders = []
+    try:
+        # Include workspace root
+        root_name = os.path.basename(workspace.rstrip(os.sep)) or workspace
+        folders.append({
+            "path": ".",
+            "name": root_name,
+            "full_path": workspace,
+        })
+        for root, dirs, _ in os.walk(workspace):
+            dirs[:] = [d for d in dirs if not any(
+                fnmatch.fnmatch(d, pattern) for pattern in ignore_patterns
+            )]
+            for d in dirs:
+                full_path = os.path.join(root, d)
+                rel_path = os.path.relpath(full_path, workspace)
+                if search_filter and search_filter not in rel_path.lower():
+                    continue
+                folders.append({
+                    "path": rel_path,
+                    "name": d,
+                    "full_path": full_path,
+                })
+            if len(folders) > 80:
+                break
+        folders.sort(key=lambda x: x["path"])
+        return {"ok": True, "folders": folders[:80], "workspace": workspace}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
 
 class ReadFileRequest(BaseModel):
     path: str = None
