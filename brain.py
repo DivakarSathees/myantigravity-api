@@ -445,6 +445,14 @@ Flow: 1) Run version check command(s) via execute_terminal. 2) If tools are miss
 3. Run build/start via command line only (e.g. npm run dev, python app.py)
 4. Report completion
 
+🏗️ SCAFFOLDING FROM WORKSPACE TEMPLATES:
+When the user asks to create scaffolding for a selected project (empty solution + run.sh from templates):
+1. The message will include "TARGET FOLDER FOR SCAFFOLDING" with an absolute path – create all new files there.
+2. Your current workspace is the workspace root: look for sample templates under templates/scaffolding, scaffolding-templates, or similar folders (list or find_file to locate them).
+3. Read the template files (empty solution structure, run.sh, and any layout) using manage_file with paths relative to workspace.
+4. Create the same structure in the TARGET FOLDER using manage_file with the target absolute path (e.g. TARGET_PATH/run.sh, TARGET_PATH/subdir/file). Use empty solution layout and copy/adapt run.sh and other template files into the target folder.
+5. Do not run scripts for scaffolding – only read templates and write files (manage_file). Use execute_terminal only if needed for listing (e.g. ls templates/scaffolding).
+
 ❌ ERROR AUTO-FIX:
 1. Understand the error
 2. Fix silently

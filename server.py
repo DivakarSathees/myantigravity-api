@@ -213,23 +213,39 @@ async def chat(request: ChatRequest):
     # Set current session ID for tracking
     current_session_id = session_id
     
-    # Use scope_path (folder selected for / prompt) as workspace for this request so agent reads/runs in that folder
-    effective_workspace = request.scope_path or request.workspace_path
-    if effective_workspace:
+    # Scaffolding: use workspace root so agent can read templates; target folder is scope_path
+    message_to_store = request.message
+    is_scaffolding = (
+        request.scope_path
+        and request.workspace_path
+        and "scaffolding" in (request.message or "").lower()
+    )
+    if is_scaffolding:
+        effective_workspace = request.workspace_path
         set_workspace_path(effective_workspace)
-        if request.scope_path:
-            await broadcast_log(f"📁 Working in selected folder: {request.scope_path}")
-        else:
-            await broadcast_log(f"📁 Working in: {request.workspace_path}")
-    
+        message_to_store = (
+            f"TARGET FOLDER FOR SCAFFOLDING (create all scaffolding files here – use this absolute path when writing): {request.scope_path}\n\n"
+            + request.message
+        )
+        await broadcast_log(f"📁 Scaffolding: using workspace for templates, target folder: {request.scope_path}")
+    else:
+        # Use scope_path (folder selected for / prompt) as workspace for this request so agent reads/runs in that folder
+        effective_workspace = request.scope_path or request.workspace_path
+        if effective_workspace:
+            set_workspace_path(effective_workspace)
+            if request.scope_path:
+                await broadcast_log(f"📁 Working in selected folder: {request.scope_path}")
+            else:
+                await broadcast_log(f"📁 Working in: {request.workspace_path}")
+
     # Start progress tracking session
     await start_progress_session()
-    
+
     # Add initial task
     analyze_task = await add_progress_task("Analyzing request", "Understanding what you need...")
-    
+
     # Add user message to history
-    session["messages"].append(HumanMessage(content=request.message))
+    session["messages"].append(HumanMessage(content=message_to_store))
     session["updated_at"] = datetime.now().isoformat()
     
     # Update title based on first message
