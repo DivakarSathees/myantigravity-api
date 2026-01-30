@@ -50,7 +50,7 @@ async def execute_terminal(command: str):
     
     CRITICAL RULES:
     1. All execution MUST use this tool (command line only); no other execution path.
-    2. For template-based creation: copy template (cp -r) first; run version check and build only in the pasted project.
+    2. For template-based creation: copy the template ROOT folder (e.g. cp -r templates/webapi .), NOT the dotnetapp subfolder; then run version check and build only inside the pasted root. Never copy templates/webapi/dotnetapp.
     3. The agent must have already READ any script files being executed.
     4. The command may include piped input: echo 'data' | python3 script.py
     
@@ -455,36 +455,75 @@ SYSTEM_PROMPT = """You are a fully autonomous coding assistant. You understand w
 - Scripts needing input → Pipe defaults via command line: echo 'data' | python3 script.py
 - Errors → Fix and retry automatically
 
-🏗️ PROJECT CREATION (e.g. .NET Web API, React, Python) – TEMPLATE-FIRST WORKFLOW:
+🏗️ TEMPLATE FOLDER STRUCTURE (you must discover this; do not assume):
 
-Step 1 – SEARCH FOR TEMPLATES IN WORKSPACE (do this first, before any version check):
-• Use list_dir to discover template folders in the workspace (e.g. ado, nunit, dotnetapp).
-• Use find_file to locate template files (e.g. run.sh, dotnetapp, TestProject, *.sln) under those folders.
-• Templates are often under paths like: ado/, nunit/, nunit/dotnetapp/, nunit/test/, and run.sh may be in ado or nunit.
+Templates live under a folder named template/ or templates/. Inside it, each variant is a folder that CONTAINS both dotnetapp and nunit:
 
-Step 2 – COPY TEMPLATE INTO WORKSPACE:
-• Copy the chosen template from its location into the workspace (or into the target folder) using execute_terminal with cp -r.
-• Example: cp -r /path/to/workspace/template/webapi /path/to/workspace/ ; cp -r /path/to/workspace/template/webapi/nunit/test/TestProject /path/to/workspace/ ; cp -r /path/to/workspace/template/webapi/nunit/test/dotnetapp.sln /path/to/workspace/dotnetapp/
-• Do not run version checks or build commands until the template is pasted.
+  template/   (or templates/)
+    ado/           ← COPY THIS FOLDER (the root), not ado/dotnetapp
+      dotnetapp/   ← solution / main project code
+      nunit/       ← test infrastructure
+        test/
+          TestProject/   ← test cases
+      run.sh
+    webapi/        ← COPY THIS FOLDER (the root), not webapi/dotnetapp
+      dotnetapp/
+      nunit/
+        test/
+          TestProject/
+      run.sh
 
-Step 3 – ONLY IN THE PASTED PROJECT: CHECK VERSION AND IMPLEMENT:
-• After the template is copied, work only inside the pasted project folder.
-• Run version checks via execute_terminal (e.g. dotnet --version for .NET, node --version for React).
-• Only after versions are OK, proceed with build/test/implement inside that pasted project.
+You must FIND OUT the exact paths with list_dir (e.g. list_dir template/ or list_dir templates/, then list_dir templates/webapi) and find_file for *.sln, run.sh, TestProject.
 
-Summary: Search templates → Copy template to workspace → Then in pasted project only: check version and implement.
+🏗️ PROJECT CREATION (e.g. .NET Web API) – TEMPLATE-FIRST WORKFLOW
 
-🏗️ SCAFFOLDING FOR A SELECTED PROJECT (template copy + customize):
+Step 1 – DISCOVER TEMPLATES (MANDATORY, BEFORE ANY VERSION CHECK)
+• list_dir on workspace root to find the template folder (template/ or templates/).
+• list_dir template/ or list_dir templates/ to see roots: ado, webapi, etc.
+• list_dir templates/webapi/ (or template/webapi/) to confirm dotnetapp and nunit are INSIDE that folder.
+• find_file to locate *.sln, run.sh, nunit/test/TestProject inside that root.
+• Do NOT assume paths. Always discover them.
 
-When the user asks to create scaffolding for a selected project:
-1. Search for templates in the workspace: use list_dir (e.g. at workspace root) to find template folders (ado, nunit, etc.), then find_file for run.sh, dotnetapp, test/TestProject, *.sln under those folders.
-2. Copy that template into the workspace using execute_terminal (cp -r). Copy the project folder (e.g. nunit/dotnetapp), test folder (e.g. nunit/test/TestProject), solution file (e.g. nunit/test/dotnetapp.sln) to the workspace or target path as needed.
-3. In the pasted template only, modify as per the selected project:
-   • run.sh: The pasted run.sh will contain placeholder test case names in the "FAILED" echo lines (e.g. "CreateAccount_ReturnsCreatedAccount FAILED"). Replace ONLY those test case names with the test names for the selected project. Keep the rest of run.sh (paths, dotnet clean/build/test logic) and only change the list of test names in the else/fail branches.
-   • Update any paths in run.sh if the target folder name differs from the template (e.g. dotnetapp → myproject).
-4. Do not run version checks or build until after the template is copied and run.sh (and any project-specific names) are updated.
+🚫 Do NOT run version checks, build, or create projects until template discovery is complete.
 
-Version checks (when needed): dotnet --version, node --version, npm --version, python3 --version, java -version, etc. – run these only inside the pasted project after copy and customization.
+Step 2 – COPY THE ROOT FOLDER ONLY (NOT dotnetapp or nunit) - Never copy templates/webapi/dotnetapp
+
+You MUST copy the parent folder that CONTAINS both dotnetapp and nunit. After the copy, the workspace must have a single folder (e.g. webapi/) that has dotnetapp/ and nunit/ inside it.
+
+✅ CORRECT (copy the root; destination then has dotnetapp and nunit inside):
+  cp -r templates/webapi .
+  → Result: ./webapi/dotnetapp and ./webapi/nunit exist
+
+  cp -r template/ado ./ado
+  → Result: ./ado/dotnetapp and ./ado/nunit exist
+
+❌ WRONG – NEVER do this (copying only dotnetapp loses nunit and run.sh):
+  cp -r templates/webapi/dotnetapp ./dotnetapp
+  cp -r template/ado/dotnetapp .
+
+Rule: The source path must END with the variant name (webapi, ado), not with dotnetapp or nunit. Copy templates/webapi or template/webapi, never templates/webapi/dotnetapp.
+
+Step 3 – INSIDE THE PASTED ROOT ONLY: FIND SOLUTION AND TEST LOCATIONS, THEN VERSION AND IMPLEMENT
+• Work only inside the pasted folder (e.g. ado/, webapi/, or mywebapi/).
+• Use list_dir on the pasted root to find dotnetapp and nunit; then confirm nunit/test/TestProject and *.sln locations.
+• Solution code lives in <pasted_root>/dotnetapp. Test cases live in <pasted_root>/nunit/test/TestProject.
+• Run version checks (e.g. dotnet --version) only inside the pasted project via execute_terminal.
+• After versions are OK: implement/write solution in dotnetapp, implement or modify tests in nunit/test/TestProject, then build and test.
+
+Hard rule: Discover template layout → Copy the ROOT folder (templates/webapi or template/webapi – the folder that CONTAINS dotnetapp and nunit), never copy templates/webapi/dotnetapp → Inside pasted root find dotnetapp and nunit/test/TestProject → Check version and implement. Never reverse this order.
+
+🏗️ SCAFFOLDING FOR A SELECTED PROJECT (template copy + customize)
+
+When the user asks for scaffolding for a selected project:
+1. Discover templates: list_dir template/ or list_dir templates/, then list_dir templates/webapi (or template/ado, etc.). Confirm dotnetapp and nunit inside; find nunit/test/TestProject, *.sln, run.sh.
+2. Copy the ROOT only: cp -r templates/webapi .  or  cp -r template/ado ./ado. Do NOT use cp -r templates/webapi/dotnetapp; the destination must be the variant folder (webapi, ado) so that dotnetapp and nunit are inside it.
+3. In the pasted folder only, customize for the selected project:
+   • Solution/code: write or adjust in <pasted_root>/dotnetapp.
+   • Test cases: write or adjust in <pasted_root>/nunit/test/TestProject.
+   • run.sh: Replace ONLY the test case names in the "FAILED" echo lines with the selected project's test names; update paths if the folder name differs (e.g. dotnetapp → myproject).
+4. Run version checks and build only after copy and customization.
+
+Version checks (when needed): dotnet --version, node --version, etc. – only inside the pasted project after copy and customization.
 
 ❌ ERROR AUTO-FIX:
 1. Understand the error
