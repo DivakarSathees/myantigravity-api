@@ -44,13 +44,13 @@ async def execute_terminal(command: str):
     Executes a shell command and streams stdout/stderr to the UI.
     This is the ONLY way to run commands – all execution (run, install, create, build, test) must go through this tool.
     
-    PROJECT CREATION: Before creating any project (React, Python, Java, etc.), first run version checks via this tool
-    (e.g. node --version, npm --version for React; python3 --version for Python; java -version for Java). Only after
-    confirming versions, run the create/install/build commands via this tool.
+    PROJECT CREATION: For template-based creation: search templates (list_dir, find_file), copy template via this tool
+    (cp -r), then only in the pasted project run version checks and build/test. For greenfield creation: run
+    version-check commands first, then create/install/build via this tool.
     
     CRITICAL RULES:
     1. All execution MUST use this tool (command line only); no other execution path.
-    2. For project creation: run version-check commands first, then proceed with creation commands.
+    2. For template-based creation: copy template (cp -r) first; run version check and build only in the pasted project.
     3. The agent must have already READ any script files being executed.
     4. The command may include piped input: echo 'data' | python3 script.py
     
@@ -347,7 +347,35 @@ def find_file(filename: str, search_dir: str = "."):
         return f"File '{filename}' not found in '{search_dir}' or its subdirectories."
 
 
-tools = [execute_terminal, manage_file, find_file]
+@tool
+def list_dir(path: str = "."):
+    """
+    Lists files and subdirectories in the given directory. Use this to discover
+    template folders in the workspace (e.g. ado, nunit) and their structure.
+    
+    Args:
+        path: Directory path relative to workspace or absolute (default: workspace root)
+    """
+    workspace_path = get_workspace_path()
+    if not os.path.isabs(path):
+        path = os.path.join(workspace_path, path) if path != "." else workspace_path
+    if not os.path.exists(path):
+        return f"❌ Directory does not exist: {path}"
+    if not os.path.isdir(path):
+        return f"❌ Not a directory: {path}"
+    try:
+        entries = sorted(os.listdir(path))
+        lines = []
+        for name in entries:
+            full = os.path.join(path, name)
+            suffix = "/" if os.path.isdir(full) else ""
+            lines.append(name + suffix)
+        return "Contents of " + path + ":\n" + "\n".join(lines) if lines else " (empty)"
+    except Exception as e:
+        return f"❌ Error listing directory: {str(e)}"
+
+
+tools = [execute_terminal, manage_file, find_file, list_dir]
 tool_node = ToolNode(tools)
 
 # -------------------------------------------------
@@ -427,31 +455,36 @@ SYSTEM_PROMPT = """You are a fully autonomous coding assistant. You understand w
 - Scripts needing input → Pipe defaults via command line: echo 'data' | python3 script.py
 - Errors → Fix and retry automatically
 
-🏗️ PROJECT CREATION – VERSION CHECK FIRST (MANDATORY):
-Before creating ANY project, you MUST first check that required tools and their versions are installed.
-Use ONLY execute_terminal with these command-line checks; only after confirming versions, proceed with creation.
+🏗️ PROJECT CREATION (e.g. .NET Web API, React, Python) – TEMPLATE-FIRST WORKFLOW:
 
-• React / Node / JavaScript project → run: node --version, npm --version (or npx --version)
-• Python project → run: python3 --version or python --version (and pip3 --version if installing packages)
-• Java project → run: java -version, javac -version
-• .NET project → run: dotnet --version
-• Go project → run: go version
+Step 1 – SEARCH FOR TEMPLATES IN WORKSPACE (do this first, before any version check):
+• Use list_dir to discover template folders in the workspace (e.g. ado, nunit, dotnetapp).
+• Use find_file to locate template files (e.g. run.sh, dotnetapp, TestProject, *.sln) under those folders.
+• Templates are often under paths like: ado/, nunit/, nunit/dotnetapp/, nunit/test/, and run.sh may be in ado or nunit.
 
-Flow: 1) Run version check command(s) via execute_terminal. 2) If tools are missing or version fails, report and stop. 3) Only if versions are OK, proceed with create/install/build via execute_terminal only.
+Step 2 – COPY TEMPLATE INTO WORKSPACE:
+• Copy the chosen template from its location into the workspace (or into the target folder) using execute_terminal with cp -r.
+• Example: cp -r /path/to/workspace/template/webapi /path/to/workspace/ ; cp -r /path/to/workspace/template/webapi/nunit/test/TestProject /path/to/workspace/ ; cp -r /path/to/workspace/template/webapi/nunit/test/dotnetapp.sln /path/to/workspace/dotnetapp/
+• Do not run version checks or build commands until the template is pasted.
 
-🏗️ PROJECT ACTIONS (after version check):
-1. Execute all necessary steps using ONLY execute_terminal (command line)
-2. Handle dependencies via npm install, pip install, etc. (command line only)
-3. Run build/start via command line only (e.g. npm run dev, python app.py)
-4. Report completion
+Step 3 – ONLY IN THE PASTED PROJECT: CHECK VERSION AND IMPLEMENT:
+• After the template is copied, work only inside the pasted project folder.
+• Run version checks via execute_terminal (e.g. dotnet --version for .NET, node --version for React).
+• Only after versions are OK, proceed with build/test/implement inside that pasted project.
 
-🏗️ SCAFFOLDING FROM WORKSPACE TEMPLATES:
-When the user asks to create scaffolding for a selected project (empty solution + run.sh from templates):
-1. The message will include "TARGET FOLDER FOR SCAFFOLDING" with an absolute path – create all new files there.
-2. Your current workspace is the workspace root: look for sample templates under templates/scaffolding, scaffolding-templates, or similar folders (list or find_file to locate them).
-3. Read the template files (empty solution structure, run.sh, and any layout) using manage_file with paths relative to workspace.
-4. Create the same structure in the TARGET FOLDER using manage_file with the target absolute path (e.g. TARGET_PATH/run.sh, TARGET_PATH/subdir/file). Use empty solution layout and copy/adapt run.sh and other template files into the target folder.
-5. Do not run scripts for scaffolding – only read templates and write files (manage_file). Use execute_terminal only if needed for listing (e.g. ls templates/scaffolding).
+Summary: Search templates → Copy template to workspace → Then in pasted project only: check version and implement.
+
+🏗️ SCAFFOLDING FOR A SELECTED PROJECT (template copy + customize):
+
+When the user asks to create scaffolding for a selected project:
+1. Search for templates in the workspace: use list_dir (e.g. at workspace root) to find template folders (ado, nunit, etc.), then find_file for run.sh, dotnetapp, test/TestProject, *.sln under those folders.
+2. Copy that template into the workspace using execute_terminal (cp -r). Copy the project folder (e.g. nunit/dotnetapp), test folder (e.g. nunit/test/TestProject), solution file (e.g. nunit/test/dotnetapp.sln) to the workspace or target path as needed.
+3. In the pasted template only, modify as per the selected project:
+   • run.sh: The pasted run.sh will contain placeholder test case names in the "FAILED" echo lines (e.g. "CreateAccount_ReturnsCreatedAccount FAILED"). Replace ONLY those test case names with the test names for the selected project. Keep the rest of run.sh (paths, dotnet clean/build/test logic) and only change the list of test names in the else/fail branches.
+   • Update any paths in run.sh if the target folder name differs from the template (e.g. dotnetapp → myproject).
+4. Do not run version checks or build until after the template is copied and run.sh (and any project-specific names) are updated.
+
+Version checks (when needed): dotnet --version, node --version, npm --version, python3 --version, java -version, etc. – run these only inside the pasted project after copy and customization.
 
 ❌ ERROR AUTO-FIX:
 1. Understand the error
@@ -615,10 +648,9 @@ app = workflow.compile(
     debug=False
 )
 
-# Configure recursion limit
-# from langgraph.pregel import RetryPolicy
+# Configure recursion limit (agent→tools→agent cycles; increase if long tasks hit limit)
 app.config = {
-    "recursion_limit": 50  # Increased from default 25
+    "recursion_limit": 150
 }
 
 # -------------------------------------------------

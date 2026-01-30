@@ -257,7 +257,7 @@ async def chat(request: ChatRequest):
     
     # Create inputs with full conversation history and recursion limit
     inputs = {"messages": session["messages"].copy()}
-    config = {"recursion_limit": 50}  # Prevent recursion errors
+    config = {"recursion_limit": 150}  # Allow longer agent→tool→agent chains before stopping
     final_response = ""
     
     # Track current task for updates
