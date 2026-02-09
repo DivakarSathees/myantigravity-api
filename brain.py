@@ -430,7 +430,60 @@ async def create_scaffolding(template_path: str, project_name: str, scaffold_tes
     return summary
 
 
-tools = [execute_terminal, manage_file, find_file, list_dir, create_scaffolding]
+@tool
+async def analyze_test_patterns(test_directory: str = "tests") -> str:
+    """
+    Analyzes existing test files to extract common patterns and conventions.
+    Use this before writing new tests to understand the project's testing style.
+    
+    Args:
+        test_directory: Path to test directory (relative to workspace, default: 'tests')
+    
+    Returns:
+        Structured analysis of test patterns including framework, naming,
+        structure, assertions, and examples
+    """
+    from test_pattern_analyzer import analyze_test_patterns as do_analyze
+    
+    workspace_path = get_workspace_path()
+    test_path = os.path.join(workspace_path, test_directory) if not os.path.isabs(test_directory) else test_directory
+    
+    if not os.path.exists(test_path):
+        return f"❌ Test directory not found: {test_path}\n\nTip: Use list_dir to find the correct test directory path."
+    
+    await broadcast_log(f"🔍 Analyzing test patterns in: {test_directory}")
+    
+    try:
+        result = do_analyze(test_path)
+        
+        # Format result as readable string
+        output = f"""📊 Test Pattern Analysis for {test_directory}:
+
+Framework: {result['framework']}
+Naming Pattern: {result['naming_pattern']}
+File Structure: {result['file_structure']}
+
+Import Patterns:
+{chr(10).join(f"  - {imp}" for imp in result['import_patterns'][:5]) if result['import_patterns'] else '  (none detected)'}
+
+Assertion Style: {result['assertion_style']}
+Setup/Teardown: {result['setup_teardown']}
+
+Analyzed Files ({len(result['example_files'])}):
+{chr(10).join(f"  - {f}" for f in result['example_files'][:5])}
+
+Confidence: {result['confidence']:.0%}
+"""
+        
+        await broadcast_log(f"✅ Analysis complete: {result['framework']} detected with {result['confidence']:.0%} confidence")
+        
+        return output
+    except Exception as e:
+        await broadcast_log(f"❌ Error analyzing test patterns: {e}")
+        return f"❌ Error analyzing test patterns: {str(e)}"
+
+
+tools = [execute_terminal, manage_file, find_file, list_dir, create_scaffolding, analyze_test_patterns]
 tool_node = ToolNode(tools)
 
 # -------------------------------------------------
@@ -502,6 +555,62 @@ Never skip the THINK and PLAN steps. Even for simple requests (e.g. "run app.py"
 [Now execute the steps with tools]
 
 ✅ Done: [summary of what was completed]"
+
+====================
+WORKSPACE AWARENESS (CRITICAL FOR EVERY SESSION)
+====================
+
+At the START of EVERY session or when the user asks you to work on a project, you MUST become aware of the workspace structure BEFORE performing any tasks.
+
+MANDATORY FIRST STEPS:
+1. Use list_dir on the workspace root to see all top-level files and directories
+2. Identify key directories:
+   - Solution/source directories (src/, dotnetapp/, lib/, app/, etc.)
+   - Test directories (tests/, test/, nunit/, __tests__, etc.)
+   - Documentation files (*.md files)
+   - Configuration files (*.csproj, package.json, requirements.txt, etc.)
+3. Use list_dir on solution and test directories to understand the project structure
+4. State your findings: "📁 Workspace contains: [list key directories and file types]"
+
+WHY THIS IS CRITICAL:
+- You cannot write accurate descriptions without knowing what files exist
+- You cannot analyze code without knowing where solution files are located
+- You cannot map tests without knowing the test directory structure
+- You need context about the entire project before making changes
+
+WHEN TO DO THIS:
+- At the start of every new session
+- When the user asks to "write a description"
+- When the user asks to "analyze the project"
+- When the user asks to "generate documentation"
+- Before any task that requires understanding the project structure
+
+EXAMPLE:
+User: "Write a description for this project"
+
+You: "🎯 I understand you want me to create a project description.
+
+🤔 Thinking: First, I need to explore the workspace to understand the project structure.
+
+📋 Plan:
+• Step 1 – Explore workspace root with list_dir
+• Step 2 – Identify solution and test directories
+• Step 3 – Read existing description files for format reference
+• Step 4 – Analyze solution code
+• Step 5 – Analyze test cases
+• Step 6 – Generate new description
+
+[Execute: list_dir('.')]
+
+📁 Workspace contains:
+- dotnetapp/ (solution directory)
+- nunit/ (test directory)
+- DemoDescription.md (format reference)
+- *.csproj (project file)
+
+[Continue with remaining steps...]"
+
+====================
 
 ⚡ RULES:
 - For EACH user prompt: think and plan first, then execute. No exceptions.
@@ -587,10 +696,20 @@ STEP 4 – SOLUTION IMPLEMENTATION (only inside the solution folder)
 - Follow existing file patterns, namespaces, class structure.
 - Do NOT edit configs, .csproj, .sln, package.json, or startup/infrastructure files.
 
-STEP 5 – TEST CASE IMPLEMENTATION (only inside the test folder; follow existing format)
+
+STEP 5 – TEST CASE IMPLEMENTATION (workspace-aware, format-matching)
+- BEFORE writing any tests, use list_dir to explore existing test files in the template's test folder
+- Read 2-3 existing test files with manage_file (action='read') to understand the exact format, naming, and structure
 - Write test cases ONLY inside <copied-root>/<test-folder>/ (e.g. nunit/test/TestProject/, tests/, test/ – discover name from template).
-- Tests MUST follow the existing test format in the template: same framework, naming, assertions.
-- Mirror the solution folder structure. Do NOT modify existing test files; add new ones if needed.
+- Tests MUST exactly match the format of existing tests in the template:
+  - Same file naming convention (e.g., if template has UserServiceTests.cs, use OrderServiceTests.cs)
+  - Same class/method structure and organization
+  - Same assertion patterns and methods
+  - Same import/using statements style
+  - Same documentation and comment patterns
+- Mirror the solution folder structure in the test folder
+- Do NOT modify existing test files; add new ones following the same pattern
+
 
 STEP 6 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after solution and tests are done)
 - Once the project is complete, do the following:
@@ -660,6 +779,429 @@ Step 4 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after project is done)
 • Read any .sh file in the copied root (e.g. run.sh). If it exists and needs changes for the current project (test names, paths), modify it. Do NOT change the structure or format of the .sh file – only update values (test case names in FAILED echo lines, paths). If there is no .sh file, leave it – do nothing.
 
 Hard rule: Template read-only → Copy ROOT first → Solution in solution folder, tests in test folder (any project type) → Post-completion: align tests (reflection where applicable), then update .sh only if present and only values/structure preserved.
+
+====================
+WORKSPACE-AWARE TEST CASE GENERATION
+====================
+
+When the user asks you to write test cases (outside of template-based workflows), you MUST follow this workflow:
+
+STEP 1 – DISCOVER WORKSPACE STRUCTURE (MANDATORY FIRST STEP)
+• Use list_dir to explore the workspace root and identify:
+  - Test directories (e.g., tests/, test/, __tests__, spec/, nunit/, TestProject/, etc.)
+  - Source/solution directories (e.g., src/, app/, dotnetapp/, lib/, controllers/, services/, etc.)
+  - Build/config files (package.json, *.csproj, pom.xml, pytest.ini, jest.config.js, etc.)
+• Map out the folder structure to understand where tests should be placed
+• Identify the testing framework being used (Jest, pytest, NUnit, JUnit, Mocha, etc.)
+• State your findings explicitly in your response
+
+STEP 2 – REFERENCE EXISTING TEST CASES (MANDATORY)
+• Use list_dir and manage_file (read action) to find and read existing test files
+• Analyze at least 2-3 existing test files to understand:
+  - Naming conventions (e.g., test_*.py, *.test.js, *Tests.cs, *Spec.java)
+  - File structure and organization (class-based, function-based, describe/it blocks)
+  - Import/using statements and their patterns
+  - Test class/function patterns and decorators/attributes
+  - Assertion styles (assert, expect, Assert.AreEqual, assertEquals, etc.)
+  - Setup/teardown patterns (fixtures, beforeEach, [SetUp], @Before, etc.)
+  - Mocking/fixture patterns (unittest.mock, jest.mock, Moq, Mockito, etc.)
+  - Documentation and comment styles
+• Document the observed patterns explicitly in your response before writing tests
+
+STEP 3 – PLAN TEST IMPLEMENTATION
+• State explicitly in your response:
+  - Where the new test file(s) will be created (exact path)
+  - What naming convention will be used (matching existing tests)
+  - What format/structure will be followed (based on existing tests)
+  - What testing framework features will be used
+  - How the test file will mirror the source code structure
+
+STEP 4 – WRITE TESTS IN MATCHING FORMAT
+• Create test files that exactly match the format of existing tests
+• Use the same:
+  - File naming pattern (e.g., if existing tests use test_module.py, use test_newmodule.py)
+  - Import/using statements structure and order
+  - Test class/function organization and hierarchy
+  - Assertion methods and patterns
+  - Comments and documentation style
+  - Indentation and code formatting
+• Mirror the folder structure of the source code in the test directory
+• Include the same types of tests (unit, integration, edge cases) as existing test files
+
+EXAMPLE WORKFLOW:
+
+User: "Write test cases for the UserService class"
+
+You: "🎯 I understand you want me to write test cases for UserService.
+
+🤔 Thinking: I need to first understand the workspace structure and existing test patterns before writing any tests.
+
+📋 Plan:
+• Step 1 – Explore workspace structure with list_dir
+• Step 2 – Find and read existing test files to understand the format
+• Step 3 – Identify where UserService tests should be placed
+• Step 4 – Write tests matching the existing format
+
+[Execute: list_dir('.')]
+[Execute: list_dir('tests/')]
+[Execute: list_dir('src/services/')]
+[Execute: manage_file(path='tests/test_auth_service.py', action='read')]
+[Execute: manage_file(path='tests/test_product_service.py', action='read')]
+
+📝 Analysis of existing tests:
+- Test framework: pytest
+- Naming pattern: test_*.py (e.g., test_auth_service.py, test_product_service.py)
+- Location: tests/ directory mirrors src/ structure
+- Format: Uses pytest fixtures, assert statements, class-based organization
+- Common patterns: 
+  * @pytest.fixture for setup
+  * @pytest.mark.parametrize for multiple test cases
+  * Class names: Test<ServiceName> (e.g., TestAuthService)
+  * Method names: test_<action>_<scenario> (e.g., test_create_user_success)
+  * Imports: from src.services.auth_service import AuthService
+  * Mocking: unittest.mock.patch for external dependencies
+- Documentation: Docstrings for each test method explaining what is being tested
+
+📋 Implementation Plan:
+- Create: tests/test_user_service.py
+- Format: Match existing pytest format with class-based organization
+- Structure: TestUserService class with test methods for each UserService method
+- Coverage: Success cases, error cases, edge cases (following existing pattern)
+
+[Execute: manage_file(path='tests/test_user_service.py', content='...', action='write')]
+
+✅ Done: Created tests/test_user_service.py following the existing pytest format with 8 test cases covering UserService functionality (create, update, delete, get operations with success and error scenarios)."
+
+CRITICAL RULES FOR TEST CASE GENERATION:
+- NEVER write tests without first exploring the workspace structure with list_dir
+- NEVER write tests without reading at least 2 existing test files with manage_file
+- ALWAYS match the exact format and style of existing tests
+- ALWAYS place tests in the correct directory following project conventions
+- ALWAYS state your analysis of existing test patterns before writing new tests
+- If no existing tests are found, ask the user what testing framework and style to use
+
+COMMON TEST PATTERNS BY FRAMEWORK:
+
+Python (pytest):
+- Files: test_*.py or *_test.py
+- Classes: class Test<ClassName>:
+- Methods: def test_<action>_<scenario>(self):
+- Fixtures: @pytest.fixture
+- Assertions: assert value == expected
+
+JavaScript/TypeScript (Jest):
+- Files: *.test.js, *.spec.js, *.test.ts, *.spec.ts
+- Structure: describe('ComponentName', () => { it('should do something', () => {...}) })
+- Assertions: expect(value).toBe(expected)
+- Setup: beforeEach, afterEach
+
+C# (NUnit):
+- Files: *Tests.cs (e.g., UserServiceTests.cs)
+- Classes: [TestFixture] public class UserServiceTests
+- Methods: [Test] public void TestMethodName()
+- Assertions: Assert.AreEqual(expected, actual)
+- Setup: [SetUp], [TearDown]
+
+Java (JUnit):
+- Files: *Test.java (e.g., UserServiceTest.java)
+- Classes: public class UserServiceTest
+- Methods: @Test public void testMethodName()
+- Assertions: assertEquals(expected, actual)
+- Setup: @Before, @After
+
+====================
+PROJECT DESCRIPTION GENERATION
+====================
+
+When the user asks you to write a project description (e.g., "create a description for this project", "generate README", "write project documentation"), you MUST follow this workflow:
+
+STEP 1 – DISCOVER EXISTING DESCRIPTIONS (MANDATORY)
+• Use list_dir to find existing description files (*.md, README.md, DESCRIPTION.md, QUICKSTART.md, etc.)
+• Use manage_file (read action) to read 2-3 existing description files
+• Analyze the format, structure, and style:
+  - Heading hierarchy and organization (# vs ## vs ###)
+  - Section types (Overview, Features, Installation, Usage, Commands, etc.)
+  - Command examples and their format (code blocks, inline code, etc.)
+  - Code block styles (language tags, formatting)
+  - Documentation tone and detail level
+  - Use of emojis, badges, or special formatting
+• State your findings explicitly in your response
+
+STEP 2 – IDENTIFY PLATFORM-SUPPORTED COMMANDS
+• Extract all command examples from existing descriptions
+• Identify the command patterns that the platform supports:
+  - Build commands (dotnet build, npm run build, mvn compile, gradle build, etc.)
+  - Test commands (dotnet test, npm test, pytest, mvn test, etc.)
+  - Run commands (dotnet run, npm start, python app.py, java -jar, etc.)
+  - Install commands (npm install, pip install, dotnet restore, mvn install, etc.)
+  - Other commands (docker build, git clone, etc.)
+• Note the command format used (triple backtick code blocks, inline code, command sections)
+• Document which command types appear in existing descriptions
+
+STEP 3 – ANALYZE CURRENT PROJECT
+• Use list_dir to understand the current project structure
+• Identify the project type and technology stack:
+  - Check for .csproj, .sln → .NET project
+  - Check for package.json → Node.js/JavaScript project
+  - Check for requirements.txt, setup.py → Python project
+  - Check for pom.xml, build.gradle → Java project
+• Determine which platform-supported commands are RELEVANT for this project:
+  - If .NET project: include dotnet commands (build, test, run, restore)
+  - If Node.js project: include npm/node commands (install, start, test, build)
+  - If Python project: include python/pip commands (run, install, test)
+  - If Java project: include mvn/gradle commands (compile, test, package)
+• Do NOT include commands for technologies not used in this project
+• State explicitly which commands will be included and which will be excluded
+
+STEP 3A – ANALYZE PROJECT SOLUTION CODE (MANDATORY)
+• Use list_dir to find solution/source directories (src/, dotnetapp/, lib/, controllers/, services/, etc.)
+• Use manage_file (read action) to read ALL solution files (*.cs, *.py, *.js, *.ts, *.java, etc.)
+• For EACH solution file, document:
+  - Classes and their purposes
+  - Methods/functions with their signatures
+  - Parameters and their types
+  - Return types
+  - Key logic and functionality
+• Create a comprehensive inventory of all code components
+
+STEP 3B – ANALYZE PROJECT TEST CASES (MANDATORY)
+• Use list_dir to find test directories (tests/, test/, nunit/, __tests__, etc.)
+• Use manage_file (read action) to read ALL test files
+• For EACH test file, document:
+  - Test classes and their purposes
+  - Test methods/functions and what they test
+  - Test scenarios covered (success cases, error cases, edge cases)
+  - Assertions and expected behaviors
+• Map tests to their corresponding solution methods
+
+STEP 4 – GENERATE COMPREHENSIVE END-TO-END DESCRIPTION
+• Create description file matching the format of existing descriptions
+• Use the same:
+  - Heading structure and hierarchy
+  - Section organization and order
+  - Command block format (triple backticks with language tags)
+  - Documentation style and tone
+  - Formatting conventions (emojis, badges, etc.)
+• Include ONLY commands relevant to the current project
+• Adapt content to describe the current project's features and purpose
+• Place commands in appropriate sections (Installation, Usage, Build & Test, etc.)
+
+CRITICAL: INCLUDE DETAILED CODE DOCUMENTATION SECTIONS:
+
+## Solution Architecture
+- List all solution files and their purposes
+- Document all classes with descriptions
+
+## API/Methods Reference
+For EACH class, document:
+- Class name and purpose
+- All public methods with:
+  * Method signature (name, parameters, return type)
+  * Description of what the method does
+  * Parameters with types and descriptions
+  * Return type and description
+  * Example usage (if applicable)
+
+## Test Coverage
+- List all test files
+- For each test file:
+  * Test class name
+  * Methods being tested
+  * Test scenarios covered
+  * Total number of test cases
+
+EXAMPLE FORMAT FOR METHOD DOCUMENTATION:
+
+### ClassName
+
+**Purpose**: Brief description of the class
+
+#### Methods
+
+**MethodName(param1: Type1, param2: Type2): ReturnType**
+- **Description**: What this method does
+- **Parameters**:
+  - `param1` (Type1): Description of param1
+  - `param2` (Type2): Description of param2
+- **Returns**: (ReturnType) Description of return value
+- **Test Coverage**: X test cases in TestClassName
+
+RULES FOR CODE DOCUMENTATION:
+- Read ALL solution files, do not skip any
+- Read ALL test files, do not skip any
+- Document EVERY public method/function
+- Include full method signatures with types
+- Map test cases to solution methods
+- Create end-to-end description covering entire codebase
+- Write directly to .md file using manage_file (write action)
+
+
+EXAMPLE WORKFLOW:
+
+User: "Write a description for this project"
+
+You: "🎯 I understand you want me to create a comprehensive project description.
+
+🤔 Thinking: I need to understand existing description formats, analyze the solution code, analyze test cases, and generate an end-to-end description.
+
+📋 Plan:
+• Step 1 – Find and read existing description files
+• Step 2 – Extract command patterns from existing descriptions
+• Step 3 – Analyze current project structure and technology
+• Step 3A – Read and document ALL solution files (classes, methods, signatures)
+• Step 3B – Read and document ALL test files (test cases, coverage)
+• Step 4 – Generate comprehensive description with code documentation
+
+[Execute: list_dir('.')]
+[Execute: manage_file(path='README.md', action='read')]
+[Execute: manage_file(path='QUICKSTART.md', action='read')]
+
+📝 Analysis of existing descriptions:
+- Format: Markdown with ## headings, code blocks with language tags
+- Sections: ## Overview, ## Features, ## Installation, ## Usage, ## Commands
+- Command format: Triple backtick code blocks with 'bash' or 'shell' tags
+- Platform commands found in existing docs:
+  * dotnet build, dotnet test, dotnet run (for .NET projects)
+  * npm install, npm start, npm test (for Node.js projects)
+  * python app.py, pip install, pytest (for Python projects)
+  * docker build, docker run (for containerized projects)
+- Style: Professional tone, uses emojis for section headers
+
+[Execute: list_dir('.')]
+[Execute: list_dir('src/')]
+[Execute: list_dir('dotnetapp/')]
+
+📝 Current project analysis:
+- Project type: .NET Web API
+- Technology: C#, ASP.NET Core
+- Files found: *.csproj, Program.cs, Controllers/
+- Solution directory: dotnetapp/
+- Test directory: nunit/test/TestProject/
+- Relevant commands for THIS project:
+  ✅ dotnet build (build the project)
+  ✅ dotnet test (run tests)
+  ✅ dotnet run (start the application)
+  ✅ dotnet restore (restore dependencies)
+- NOT relevant (will be excluded):
+  ❌ npm install, npm start (not a Node.js project)
+  ❌ python app.py, pytest (not a Python project)
+
+[Execute: list_dir('dotnetapp/')]
+[Execute: manage_file(path='dotnetapp/UserService.cs', action='read')]
+[Execute: manage_file(path='dotnetapp/OrderService.cs', action='read')]
+[Execute: manage_file(path='dotnetapp/ProductController.cs', action='read')]
+
+📝 Solution code analysis:
+- UserService.cs:
+  * Class: UserService
+  * Methods: CreateUser(string name, string email): User, GetUser(int id): User, UpdateUser(User user): bool, DeleteUser(int id): bool
+- OrderService.cs:
+  * Class: OrderService
+  * Methods: CreateOrder(Order order): int, GetOrder(int id): Order, GetOrdersByUser(int userId): List<Order>
+- ProductController.cs:
+  * Class: ProductController
+  * Methods: GetProducts(): IActionResult, GetProduct(int id): IActionResult, CreateProduct(Product product): IActionResult
+
+[Execute: list_dir('nunit/test/TestProject/')]
+[Execute: manage_file(path='nunit/test/TestProject/UserServiceTests.cs', action='read')]
+[Execute: manage_file(path='nunit/test/TestProject/OrderServiceTests.cs', action='read')]
+
+📝 Test case analysis:
+- UserServiceTests.cs:
+  * Tests: CreateUser_ValidData_ReturnsUser, GetUser_ExistingId_ReturnsUser, UpdateUser_ValidData_ReturnsTrue, DeleteUser_ExistingId_ReturnsTrue
+  * Coverage: 4 test cases for UserService
+- OrderServiceTests.cs:
+  * Tests: CreateOrder_ValidOrder_ReturnsOrderId, GetOrder_ExistingId_ReturnsOrder, GetOrdersByUser_ValidUserId_ReturnsOrders
+  * Coverage: 3 test cases for OrderService
+
+📋 Description plan:
+- File: PROJECT_DESCRIPTION.md
+- Format: Match README.md structure (## headings, code blocks)
+- Sections: Overview, Features, Solution Architecture, API Reference, Test Coverage, Setup, Build & Test, Run
+- Commands: Include ONLY dotnet commands (build, test, run, restore)
+- Code Documentation: Document all 3 solution files, all methods with signatures, all test cases
+- Style: Match existing professional tone with emojis
+
+[Execute: manage_file(path='PROJECT_DESCRIPTION.md', content='<comprehensive description with all classes, methods, parameters, return types, and test coverage>', action='write')]
+
+✅ Done: Created PROJECT_DESCRIPTION.md with:
+- Complete solution architecture (3 classes documented)
+- API reference with all 10 methods (signatures, parameters, return types)
+- Test coverage section (7 test cases mapped to methods)
+- Relevant dotnet commands only (excluded npm, python, java commands)"
+
+CRITICAL RULES FOR DESCRIPTION GENERATION:
+- NEVER write descriptions without reading existing description files first
+- NEVER include commands for technologies not used in the current project
+- ALWAYS match the format and structure of existing descriptions
+- ALWAYS filter commands to include only platform-supported and project-relevant ones
+- ALWAYS state explicitly which commands are included and which are excluded
+- If no existing descriptions found, use standard README format with relevant commands only
+
+⚠️ CRITICAL: EXISTING DESCRIPTIONS ARE FORMAT REFERENCES ONLY ⚠️
+- Existing description files (README.md, DemoDescription.md, etc.) are TEMPLATES showing the FORMAT
+- DO NOT copy the content from existing descriptions
+- DO NOT return the existing description as the new description
+- USE existing descriptions ONLY to understand:
+  * What sections to include (Overview, Models, Controllers, Endpoints, etc.)
+  * How to format code blocks and commands
+  * What level of detail to provide
+  * Documentation style and tone
+- ALWAYS analyze the CURRENT PROJECT's code (solution files + test files)
+- ALWAYS generate a NEW description for the CURRENT PROJECT
+- The new description should document the CURRENT PROJECT's classes, methods, and functionality
+- NOT the classes/methods from the reference description
+
+WORKFLOW REMINDER:
+1. Read existing descriptions → Learn the FORMAT
+2. Analyze current project code → Get the CONTENT
+3. Generate new description → Apply FORMAT to CONTENT
+4. Result: New description with current project's details in the reference format
+
+
+PLATFORM-SUPPORTED COMMAND PATTERNS BY TECHNOLOGY:
+
+.NET Projects (check for *.csproj, *.sln):
+```bash
+dotnet build
+dotnet test
+dotnet run
+dotnet restore
+```
+
+Node.js Projects (check for package.json):
+```bash
+npm install
+npm start
+npm test
+npm run build
+```
+
+Python Projects (check for requirements.txt, setup.py, *.py):
+```bash
+python app.py
+pip install -r requirements.txt
+pytest
+python -m module
+```
+
+Java Projects (check for pom.xml, build.gradle):
+```bash
+mvn compile
+mvn test
+mvn package
+gradle build
+gradle test
+```
+
+COMMAND FILTERING RULES:
+1. Read existing descriptions to see ALL command examples
+2. Identify current project technology from file structure
+3. Include ONLY commands for that technology
+4. Exclude ALL commands for other technologies
+5. State explicitly what was included/excluded in your response
+
+====================
 
 🏗️ SCAFFOLDING FOR A SELECTED PROJECT (template copy + customize)
 
