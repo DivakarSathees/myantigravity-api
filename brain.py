@@ -8,7 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode, tools_condition  # tools_condition kept for compatibility; custom route_tools_or_end used instead
 
 # Import broadcast_log, workspace path, and process tracking from utils
 from utils import broadcast_log, get_workspace_path as _get_workspace_path, running_processes
@@ -483,8 +483,139 @@ Confidence: {result['confidence']:.0%}
         return f"❌ Error analyzing test patterns: {str(e)}"
 
 
-tools = [execute_terminal, manage_file, find_file, list_dir, create_scaffolding, analyze_test_patterns]
-tool_node = ToolNode(tools)
+@tool
+async def generate_project_description(
+    reference_description: str = "DemoDescription.md",
+    output_filename: str = "PROJECT_DESCRIPTION.md"
+) -> str:
+    """
+    Generates a comprehensive scenario-based project description by analyzing
+    solution code and test cases, using a reference description for format.
+    
+    This tool will:
+    1. Explore workspace structure to identify solution and test directories
+    2. Read reference description file to learn the format
+    3. Analyze ALL solution files (classes, methods, parameters, return types)
+    4. Analyze ALL test files (test cases, coverage)
+    5. Generate NEW description for the CURRENT project following the reference format
+    6. Write to output file
+    
+    Args:
+        reference_description: Path to reference description file (default: DemoDescription.md)
+        output_filename: Name of output file (default: PROJECT_DESCRIPTION.md)
+    
+    Returns:
+        Summary of generated description with statistics
+    """
+    from description_generator import generate_project_description as do_generate
+    
+    workspace_path = get_workspace_path()
+    
+    # Resolve reference description path
+    reference_path = None
+    if reference_description:
+        if not os.path.isabs(reference_description):
+            reference_path = os.path.join(workspace_path, reference_description)
+        else:
+            reference_path = reference_description
+        
+        if not os.path.exists(reference_path):
+            await broadcast_log(f"⚠️ Reference description not found: {reference_path}")
+            await broadcast_log(f"   Will generate description without format reference")
+            reference_path = None
+    
+    await broadcast_log(f"📝 Generating project description...")
+    if reference_path:
+        await broadcast_log(f"   Using format reference: {reference_description}")
+    await broadcast_log(f"   Output file: {output_filename}")
+    
+    try:
+        result = do_generate(workspace_path, reference_path, output_filename)
+        
+        if result['success']:
+            cache_info = result.get('cache_summary', '')
+            output = f"""✅ Project description generated successfully!
+
+📄 Output: {output_filename}
+
+📊 Analysis Summary:
+- Solution Files Analyzed: {len(result['solution_files'])}
+- Test Files Analyzed: {len(result['test_files'])}
+- Classes Documented: {result['classes_documented']}
+- Methods Documented: {result['methods_documented']}
+- Test Cases Documented: {result['tests_documented']}
+{f"- 📦 {cache_info}" if cache_info else ""}
+
+Solution Files:
+{chr(10).join(f"  - {f}" for f in result['solution_files'][:10])}
+{f"  ... and {len(result['solution_files']) - 10} more" if len(result['solution_files']) > 10 else ""}
+
+Test Files:
+{chr(10).join(f"  - {f}" for f in result['test_files'][:10])}
+{f"  ... and {len(result['test_files']) - 10} more" if len(result['test_files']) > 10 else ""}
+
+The description has been written to: {result['output_path']}"""
+            
+            await broadcast_log(f"✅ Description generated: {result['classes_documented']} classes, {result['methods_documented']} methods, {result['tests_documented']} tests")
+            if cache_info:
+                await broadcast_log(f"📦 {cache_info}")
+            return output
+        else:
+            error_msg = f"❌ Failed to generate description:\n" + "\n".join(f"  - {e}" for e in result['errors'])
+            await broadcast_log(f"❌ Description generation failed")
+            return error_msg
+            
+    except Exception as e:
+        await broadcast_log(f"❌ Error generating description: {e}")
+        return f"❌ Error generating project description: {str(e)}"
+
+
+# -------------------------------------------------
+# MULTI-AGENT TOOL GROUPINGS
+# -------------------------------------------------
+# Each specialized agent owns exclusive tools.
+# The orchestrator LLM sees ALL tools but execution is
+# routed to the correct specialized ToolNode.
+
+# 3) Workspace Discovery Agent – read-only workspace exploration
+workspace_tools = [list_dir, find_file]
+workspace_tool_node = ToolNode(workspace_tools)
+
+# 4) File Operations Agent – file read/write only
+file_tools = [manage_file]
+file_tool_node = ToolNode(file_tools)
+
+# 5) Execution Agent – terminal execution only
+execution_tools = [execute_terminal]
+execution_tool_node = ToolNode(execution_tools)
+
+# 6) Template Agent – scaffolding/template operations
+template_tools = [create_scaffolding]
+template_tool_node = ToolNode(template_tools)
+
+# 7) Test Agent – test pattern analysis
+test_tools = [analyze_test_patterns]
+test_tool_node = ToolNode(test_tools)
+
+# 8) Documentation Agent – project description generation
+doc_tools = [generate_project_description]
+doc_tool_node = ToolNode(doc_tools)
+
+# All tools combined – bound to orchestrator LLM so it can call any tool
+# Also used as fallback when LLM calls tools from multiple agents in one response
+all_tools = [execute_terminal, manage_file, find_file, list_dir, create_scaffolding, analyze_test_patterns, generate_project_description]
+all_tool_node = ToolNode(all_tools)
+
+# Tool-name → specialized agent node mapping
+TOOL_TO_AGENT = {
+    "list_dir": "workspace_action",
+    "find_file": "workspace_action",
+    "manage_file": "file_action",
+    "execute_terminal": "execution_action",
+    "create_scaffolding": "template_action",
+    "analyze_test_patterns": "test_action",
+    "generate_project_description": "documentation_action",
+}
 
 # -------------------------------------------------
 # 2. State Definition
@@ -913,9 +1044,57 @@ Java (JUnit):
 PROJECT DESCRIPTION GENERATION
 ====================
 
-When the user asks you to write a project description (e.g., "create a description for this project", "generate README", "write project documentation"), you MUST follow this workflow:
+When the user asks you to write a project description (e.g., "create a description for this project", "generate README", "write project documentation"), you MUST use the generate_project_description tool.
 
-STEP 1 – DISCOVER EXISTING DESCRIPTIONS (MANDATORY)
+USAGE:
+Simply call: generate_project_description(reference_description="DemoDescription.md", output_filename="PROJECT_DESCRIPTION.md")
+
+The tool will automatically:
+1. Explore workspace structure to identify solution and test directories
+2. Read reference description file (e.g., DemoDescription.md) to learn the FORMAT
+3. Analyze ALL solution files (classes, methods, parameters, return types)
+4. Analyze ALL test files (test cases, coverage)
+5. Generate NEW description for the CURRENT project following the reference format
+6. Write to output file
+
+CRITICAL: The reference description is a FORMAT TEMPLATE ONLY
+- The tool uses it to learn what sections to include and how to format
+- The tool does NOT copy content from the reference
+- The tool generates NEW content based on the CURRENT project's code
+- Result: New description with current project's details in the reference format
+
+EXAMPLE:
+User: "Write a description for this project"
+
+You: "🎯 I understand you want me to create a project description.
+
+🤔 Thinking: I'll use the generate_project_description tool to analyze the project and create a comprehensive description.
+
+📋 Plan:
+• Step 1 – Call generate_project_description tool with DemoDescription.md as format reference
+• Step 2 – Tool will analyze solution and test files
+• Step 3 – Tool will generate PROJECT_DESCRIPTION.md
+
+[Execute: generate_project_description(reference_description='DemoDescription.md', output_filename='PROJECT_DESCRIPTION.md')]
+
+✅ Done: Generated PROJECT_DESCRIPTION.md with comprehensive documentation of all classes, methods, and test coverage."
+
+WHEN TO USE THIS TOOL:
+- User asks to "write a description"
+- User asks to "generate documentation"
+- User asks to "create README"
+- User asks to "document the project"
+
+PARAMETERS:
+- reference_description: Path to reference description file (default: "DemoDescription.md")
+  * Use this to specify which file to use as format template
+  * Can be README.md, DemoDescription.md, or any other .md file
+- output_filename: Name of output file (default: "PROJECT_DESCRIPTION.md")
+  * Specify the name of the file to generate
+
+====================
+
+STEP 1 – DISCOVER EXISTING DESCRIPTIONS (DEPRECATED - USE TOOL INSTEAD)
 • Use list_dir to find existing description files (*.md, README.md, DESCRIPTION.md, QUICKSTART.md, etc.)
 • Use manage_file (read action) to read 2-3 existing description files
 • Analyze the format, structure, and style:
@@ -1216,6 +1395,163 @@ When the user asks for scaffolding for a selected project:
 
 Version checks (when needed): dotnet --version, node --version, etc. – only inside the pasted project after copy and customization.
 
+====================
+🚀 FULL PROJECT CREATION MODE (SINGLE EXECUTION PIPELINE)
+====================
+
+When the user asks to "create a project" (or "scaffold a project", "set up a project", "build a project for [topic]"), this is FULL CREATION MODE.
+
+You MUST complete ALL of the following steps in ONE continuous execution — no stopping, no asking, no deferring.
+
+TRIGGER PHRASES: "create a project", "create project for", "set up project", "scaffold project", "build a project"
+
+⚡ EXECUTION CONTRACT (NON-NEGOTIABLE):
+IF user message contains ANY trigger phrase above, THEN:
+  1. Recognize this as FULL CREATION MODE
+  2. Execute ALL 6 steps (discovery → copy → solution → tests → description → report)
+  3. Do NOT end execution until step 6 (final report) is complete
+  4. Do NOT ask questions between steps
+  5. Do NOT output intermediate reports
+  6. Output ONLY the final consolidated report at the end
+
+THIS IS A BINDING CONTRACT. THERE ARE NO EXCEPTIONS. THERE IS NO "MAYBE". IF TRIGGERED, ALL 6 STEPS EXECUTE.
+
+🚦 CRITICAL RULES:
+• This is ONE ATOMIC TASK — do NOT stop after any individual step
+• Do NOT ask "do you want tests?" or "should I generate description?" — the answer is ALWAYS YES
+• Do NOT wait for user confirmation between steps
+• Do NOT defer description or tests to a later prompt
+• Do NOT re-discover the workspace between steps — reuse analysis from earlier steps
+• ALL analysis from earlier steps MUST be reused in later steps
+
+PIPELINE ORDER (MANDATORY — EXECUTE ALL IN SEQUENCE):
+
+STEP 1 — WORKSPACE & TEMPLATE DISCOVERY (READ-ONLY)
+• list_dir workspace root
+• Locate template folder (template/ or templates/)
+• list_dir template root to confirm: solution folder, test folder, optional run.sh
+• CACHE this structure internally — reuse it for ALL later steps
+
+STEP 2 — COPY TEMPLATE ROOT (ONCE ONLY)
+• Copy the template ROOT folder (not subfolders): cp -r templates/<variant> ./<project_name>
+• Verify copied folder contains both solution directory AND test directory
+• From this point on: ALL work happens ONLY inside the copied root
+• NEVER re-read the template folder again
+⚠️ DO NOT STOP AFTER COPYING. IMMEDIATELY CONTINUE TO STEP 3 (SOLUTION). THIS IS NOT A SEPARATE TASK.
+
+STEP 3 — SOLUTION IMPLEMENTATION
+Inside the copied root:
+• Create all required models/classes
+• Create DbContext / services / controllers (as applicable)
+• Create custom exceptions if needed
+• Follow existing solution patterns from the template
+• Do NOT modify config files or project files unless strictly required
+⚠️ DO NOT STOP AFTER SOLUTION. IMMEDIATELY CONTINUE TO STEP 4 (TESTS). DO NOT ASK "SHOULD I WRITE TESTS?" — THE ANSWER IS ALWAYS YES.
+
+STEP 4 — TEST CASE IMPLEMENTATION (MANDATORY — NOT OPTIONAL)
+Before writing tests:
+• Explore the test directory inside the copied root
+• Read at least 2 existing test files to understand: framework, naming, assertions, structure
+Then:
+• Write new test cases matching the EXACT format of existing tests
+• Place them in the correct test folder
+• Do NOT modify existing test files
+⚠️ DO NOT STOP AFTER TESTS. IMMEDIATELY CONTINUE TO STEP 5 (DESCRIPTION). DO NOT ASK "SHOULD I GENERATE DESCRIPTION?" — THE ANSWER IS ALWAYS YES.
+
+STEP 5 — DESCRIPTION GENERATION (MANDATORY — NOT OPTIONAL — SAME RUN AS TESTS)
+• Find existing description file(s) (e.g., DemoDescription.md) — extract ONLY the FORMAT
+• Do NOT copy text from the old description
+• Generate NEW description for the CURRENT project with:
+  - Overview, Features, Solution Architecture, Endpoints/API, Test Coverage, How to Run
+• OR use generate_project_description tool if available
+• If no reference description exists, state that description generation is skipped
+⚠️ DO NOT STOP AFTER DESCRIPTION. IMMEDIATELY CONTINUE TO STEP 6 (FINAL REPORT).
+
+STEP 6 — FINAL REPORT (SINGLE CONSOLIDATED OUTPUT)
+At the very end, output ONE report:
+
+🎯 Task Completed: Full Project Creation
+
+📁 Template Used:
+- <template-name>
+
+📦 Solution Implemented:
+- <list of solution files>
+
+🧪 Tests Implemented:
+- <list of test files>
+
+📝 Description:
+- <file name or skipped reason>
+
+▶️ How to Run:
+- <commands>
+
+✅ Status: Project creation completed end-to-end in a single execution
+
+Do NOT output intermediate summaries between steps.
+
+� EXAMPLE EXECUTION (FOLLOW THIS PATTERN):
+
+User: "Create a project for Library Management System"
+
+You (internal thinking): This is FULL CREATION MODE. I must do all 6 steps without stopping.
+
+Step 1 — Discovery:
+[Execute: list_dir('.')]
+[Execute: list_dir('templates')]
+[Execute: list_dir('templates/webapi')]
+Found: templates/webapi/dotnetapp, templates/webapi/nunit, DemoDescription.md
+
+Step 2 — Copy:
+[Execute: execute_terminal('cp -r templates/webapi ./library')]
+Copied template to ./library/
+
+Step 3 — Solution (NO STOPPING HERE):
+[Execute: manage_file(path='library/dotnetapp/Book.cs', action='write', content='...')
+[Execute: manage_file(path='library/dotnetapp/Member.cs', action='write', content='...')
+[Execute: manage_file(path='library/dotnetapp/BookController.cs', action='write', content='...')
+Written 5 solution files
+
+Step 4 — Tests (CONTINUE WITHOUT ASKING):
+[Execute: manage_file(path='library/nunit/test/TestProject/BookTests.cs', action='read')]
+[Execute: manage_file(path='library/nunit/test/TestProject/MemberTests.cs', action='read')]
+Read existing test format
+[Execute: manage_file(path='library/nunit/test/TestProject/LibraryTests.cs', action='write', content='...')
+Written 3 test files
+
+Step 5 — Description (STILL IN SAME RUN):
+[Execute: manage_file(path='DemoDescription.md', action='read')]
+[Execute: generate_project_description(reference_description='DemoDescription.md', output_filename='library/PROJECT_DESCRIPTION.md')]
+Generated description
+
+Step 6 — Final Report:
+🎯 Task Completed: Full Project Creation
+📁 Template: webapi
+📦 Solution: Book.cs, Member.cs, BookController.cs, LibraryService.cs, LibraryException.cs
+🧪 Tests: LibraryTests.cs (15 test cases)
+📝 Description: library/PROJECT_DESCRIPTION.md
+▶️ How to Run: cd library && dotnet build && dotnet test
+✅ Status: Project creation completed end-to-end in a single execution
+
+THE KEY: All steps happened in ONE agent response. No stopping. No asking. No deferring.
+
+�🚫 ABSOLUTE PROHIBITIONS IN FULL CREATION MODE:
+• DO NOT stop after creating the solution and wait for another prompt
+• DO NOT ask "do you want tests?" — ALWAYS write them
+• DO NOT ask "do you want a description?" — ALWAYS generate it
+• DO NOT treat description/tests as separate tasks
+• DO NOT re-discover workspace mid-run — reuse cached structure
+• DO NOT output intermediate status reports — only the final report
+
+🔁 REMINDER AFTER EACH STEP:
+After Step 2 (copy): "Template copied. CONTINUING to solution implementation..."
+After Step 3 (solution): "Solution complete. CONTINUING to test implementation..."
+After Step 4 (tests): "Tests complete. CONTINUING to description generation..."
+After Step 5 (description): "Description complete. PREPARING final report..."
+
+====================
+
 ❌ ERROR AUTO-FIX:
 1. Understand the error
 2. Fix silently
@@ -1339,37 +1675,113 @@ llm = AzureChatOpenAI(
     azure_deployment=AZURE_DEPLOYMENT,
     api_version=AZURE_API_VERSION,
     # temperature=0
-).bind_tools(tools)
+).bind_tools(all_tools)
 
 
-def call_model(state: State):
-    # Add system prompt on first message
+# -------------------------------------------------
+# 5. Multi-Agent Node Definitions
+# -------------------------------------------------
+
+# 1) Orchestrator Agent – entry point, receives user input,
+#    injects SYSTEM_PROMPT, delegates to specialized agents via tool calls.
+#    Does not call tools directly; the router dispatches to the correct agent.
+def orchestrator_agent(state: State):
+    """Orchestrator: understands intent, plans, and invokes tools.
+    System prompt is ALWAYS prepended so the LLM follows
+    Think → Plan → Execute → Report on EVERY prompt."""
+    from langchain_core.messages import SystemMessage
     messages = state["messages"]
-    if len(messages) == 1:  # First user message
-        from langchain_core.messages import SystemMessage
-        messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    # ALWAYS prepend system prompt so the LLM sees it on every turn,
+    # not just the first message. This ensures consistent behavior
+    # (think, plan, execute, report) for ALL user prompts.
+    messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
     
     return {"messages": [llm.invoke(messages)]}
 
 
+# 2) Planner Agent – the planning/reasoning is embedded in the orchestrator's
+#    SYSTEM_PROMPT (THINK→PLAN→EXECUTE→REPORT). No separate node needed;
+#    the orchestrator produces the 🎯/🤔/📋 reasoning text as part of its response.
+
+
+def route_tools_or_end(state: State):
+    """
+    Router: examines the orchestrator's last message.
+    - If no tool calls → END
+    - If tool calls all target the same agent → route to that specialized node
+    - If tool calls target multiple agents → route to fallback 'action' node
+    
+    This preserves the server.py streaming contract:
+    - Orchestrator outputs under key 'agent'
+    - Tool nodes output under their node name (checked by server.py)
+    """
+    last_message = state["messages"][-1]
+    
+    # No tool calls → end
+    if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        return END
+    
+    # Determine which specialized agent(s) the tool calls target
+    targets = set()
+    for tc in last_message.tool_calls:
+        agent_name = TOOL_TO_AGENT.get(tc["name"], "action")
+        targets.add(agent_name)
+    
+    # If all tool calls go to the same specialized agent, route there
+    if len(targets) == 1:
+        return targets.pop()
+    
+    # Mixed tools from different agents → use combined fallback
+    return "action"
+
+
 # -------------------------------------------------
-# 5. Build LangGraph Workflow
+# 6. Build Multi-Agent LangGraph Workflow
 # -------------------------------------------------
 workflow = StateGraph(State)
 
-workflow.add_node("agent", call_model)
-workflow.add_node("action", tool_node)
+# --- Agent Nodes ---
+# Orchestrator (named "agent" to preserve server.py streaming key)
+workflow.add_node("agent", orchestrator_agent)
 
+# --- Specialized Tool Agent Nodes ---
+# 3) Workspace Discovery Agent
+workflow.add_node("workspace_action", workspace_tool_node)
+# 4) File Operations Agent
+workflow.add_node("file_action", file_tool_node)
+# 5) Execution Agent
+workflow.add_node("execution_action", execution_tool_node)
+# 6) Template Agent
+workflow.add_node("template_action", template_tool_node)
+# 7) Test Agent
+workflow.add_node("test_action", test_tool_node)
+# 8) Documentation Agent
+workflow.add_node("documentation_action", doc_tool_node)
+# Fallback: combined tool node for mixed multi-tool calls
+workflow.add_node("action", all_tool_node)
+
+# --- Edges ---
+# START → Orchestrator
 workflow.add_edge(START, "agent")
-workflow.add_conditional_edges(
-    "agent",
-    tools_condition,
-    {
-        "tools": "action",
-        END: END
-    }
-)
-workflow.add_edge("action", "agent")
+
+# Orchestrator → Router (dispatches to specialized agent or END)
+ALL_TOOL_ROUTES = {
+    "workspace_action": "workspace_action",
+    "file_action": "file_action",
+    "execution_action": "execution_action",
+    "template_action": "template_action",
+    "test_action": "test_action",
+    "documentation_action": "documentation_action",
+    "action": "action",  # fallback for mixed tool calls
+    END: END,
+}
+workflow.add_conditional_edges("agent", route_tools_or_end, ALL_TOOL_ROUTES)
+
+# All specialized tool nodes → back to Orchestrator
+for agent_node in ["workspace_action", "file_action", "execution_action",
+                   "template_action", "test_action", "documentation_action", "action"]:
+    workflow.add_edge(agent_node, "agent")
+
 
 app = workflow.compile(
     # Increase recursion limit to prevent GraphRecursionError
@@ -1383,7 +1795,7 @@ app.config = {
 }
 
 # -------------------------------------------------
-# 6. Local Test
+# 7. Local Test
 # -------------------------------------------------
 if __name__ == "__main__":
     test_input = {

@@ -1,0 +1,213 @@
+---
+description: Full project creation flow when the user asks to create a project
+alwaysApply: true
+---
+
+🔧 TASK: FULL PROJECT CREATION — SINGLE EXECUTION FLOW
+
+You are operating in FULL PROJECT CREATION MODE.
+
+The user’s request to “create a project” MUST be treated as one atomic task that is completed end-to-end in a single run, without waiting for follow-up prompts.
+
+🎯 GOAL
+
+When the user asks to create a project, you MUST complete ALL of the following in one continuous execution:
+
+Discover templates
+
+Copy the template ROOT folder
+
+Implement solution code
+
+Implement test cases (matching template test format)
+
+Generate project description based ONLY on existing description format
+
+Finish with a single final report
+
+The task is NOT complete until all 5 steps are done.
+
+🚦 CRITICAL EXECUTION RULES (MANDATORY)
+
+Treat this as one single task, not multiple tasks
+
+DO NOT stop after solution creation
+
+DO NOT wait for user confirmation between steps
+
+DO NOT ask follow-up questions
+
+DO NOT defer description or tests to later
+
+DO NOT re-discover the workspace between steps
+
+All analysis from earlier steps MUST be reused
+
+This is a single-pass pipeline, not interactive mode.
+
+🧠 INTERNAL PIPELINE (YOU MUST FOLLOW THIS ORDER)
+STEP 1 — WORKSPACE & TEMPLATE DISCOVERY (READ-ONLY)
+
+list_dir workspace root
+
+locate template folder (template/ or templates/)
+
+list_dir template root to confirm:
+
+solution folder
+
+test folder
+
+optional run.sh
+
+Cache this structure internally and reuse it for all later steps
+
+STEP 2 — COPY TEMPLATE ROOT (ONCE ONLY)
+
+Copy the template ROOT folder, not subfolders
+
+Verify copied folder contains both:
+
+solution directory
+
+test directory
+
+From this point on:
+
+ALL work happens ONLY inside the copied root
+
+NEVER re-read the template folder again
+
+STEP 3 — SOLUTION IMPLEMENTATION
+
+Inside the copied root:
+
+Create all required models
+
+Create DbContext / services / controllers
+
+Create custom exception(s)
+
+Follow existing solution patterns
+
+Do NOT modify config files or project files unless strictly required
+
+STEP 4 — TEST CASE IMPLEMENTATION (MANDATORY)
+
+Before writing tests:
+
+Explore the test directory inside the copied root
+
+Read at least 2 existing test files to understand:
+
+framework
+
+naming
+
+assertions
+
+structure
+
+Then:
+
+Write new test cases matching exact format
+
+Place them in the correct test folder
+
+Do NOT modify existing test files
+
+STEP 5 — DESCRIPTION GENERATION (MANDATORY, SAME RUN)
+
+This step MUST happen in the same execution, not as a follow-up task.
+
+Description rules:
+
+Find existing description file(s) (e.g., DemoDescription.md)
+
+Extract ONLY the FORMAT (headings, order, tone)
+
+Do NOT copy text from the old description
+
+Generate a NEW description for the CURRENT project
+
+Include:
+
+overview
+
+features
+
+solution architecture
+
+endpoints
+
+test coverage
+
+how to run
+
+If no reference description exists:
+
+Explicitly state that description generation is skipped
+
+Do NOT invent a format
+
+STEP 6 — FINAL REPORT (SINGLE OUTPUT)
+
+At the very end, output one consolidated report with:
+
+What template was used
+
+What folders were created
+
+What solution files were added
+
+What test files were added
+
+What description file was created or updated
+
+How to run the project
+
+🧾 OUTPUT FORMAT (STRICT)
+
+Your final response MUST follow this structure:
+
+🎯 Task Completed: Full Project Creation
+
+📁 Template Used:
+- <template-name>
+
+📦 Solution Implemented:
+- <list of solution files>
+
+🧪 Tests Implemented:
+- <list of test files>
+
+📝 Description:
+- <file name or skipped reason>
+
+▶️ How to Run:
+- <commands>
+
+✅ Status: Project creation completed end-to-end in a single execution
+
+
+Do NOT output intermediate summaries between steps.
+
+❗ ABSOLUTE PROHIBITIONS
+
+🚫 DO NOT:
+
+Stop after creating the project
+
+Ask the user “do you want tests?”
+
+Ask the user “do you want description?”
+
+Treat description as a separate task
+
+Rediscover workspace mid-run
+
+Defer work to a later prompt
+
+This is FULL CREATION MODE, not interactive mode.
+
+🔚 END OF PROMPT

@@ -282,8 +282,8 @@ async def chat(request: ChatRequest):
                     await update_progress_task(current_task_id, "completed", "Waiting for confirmation")
                     current_task_id = await add_progress_task("Awaiting confirmation", "Please confirm the action")
 
-            # Stream tool execution
-            if key == "action":
+            # Stream tool execution (supports multi-agent: workspace_action, file_action, etc.)
+            if key == "action" or key.endswith("_action"):
                 tool_count += 1
                 tool_messages = value.get("messages", [])
                 
