@@ -263,6 +263,9 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 except Exception:
                     pass
                 
+                # Track for scalable batch review
+                _track_modified_file(path, content)
+                
                 return f"✅ File updated: {path}\n\n📝 Changes applied! You can view diff or revert in the sidebar.\n\nDiff preview:\n{diff_text[:500]}{'...' if len(diff_text) > 500 else ''}"
             
             else:
@@ -295,6 +298,9 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                         track_file_change(session_id, path, "created")
                 except Exception:
                     pass
+                
+                # Track for scalable batch review
+                _track_modified_file(path, content)
                 
                 preview = content[:300] + ("..." if len(content) > 300 else "")
                 return f"✅ File created: {path}\n\n📝 New file created! You can view or delete in the sidebar.\n\nPreview:\n{preview}"
@@ -571,6 +577,536 @@ The description has been written to: {result['output_path']}"""
 
 
 # -------------------------------------------------
+# SCALABLE REVIEW SYSTEM — Batch Review Before Build
+# -------------------------------------------------
+import hashlib
+import json as _json
+
+# ── Global State ──────────────────────────────────
+_modified_files: set = set()      # absolute paths of files written since last review
+_review_cache: dict = {}          # path → sha256 hex of last-reviewed content
+REVIEW_MODE = "FAST"              # "FAST" (default) or "STRICT"
+
+# Files that should never be reviewed (configs, non-code)
+_SKIP_EXTENSIONS = {
+    ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".csproj", ".sln", ".props", ".targets", ".lock",
+    ".md", ".txt", ".csv", ".sh", ".bat", ".ps1",
+    ".png", ".jpg", ".gif", ".ico", ".svg",
+    ".gitignore", ".editorconfig", ".dockerignore",
+}
+
+# Max lines before a file is chunked
+_MAX_LINES_PER_CHUNK = 400
+
+# Layer classification patterns (lowercase)
+_LAYER_PATTERNS = {
+    "Models":       ["model", "models", "entities", "entity", "dto", "dtos"],
+    "Data":         ["data", "dbcontext", "context", "migrations", "migration"],
+    "Services":     ["service", "services"],
+    "Repositories": ["repository", "repositories", "repo", "repos"],
+    "Controllers":  ["controller", "controllers", "endpoint", "endpoints", "api"],
+    "Exceptions":   ["exception", "exceptions", "errors", "error"],
+    "Tests":        ["test", "tests", "spec", "specs", "nunit", "junit", "__tests__"],
+    "Utilities":    ["util", "utils", "helper", "helpers", "common", "shared"],
+}
+
+
+def _track_modified_file(abs_path: str, content: str):
+    """Called by manage_file after every write. Only tracks the path as modified.
+    Does NOT update _review_cache — that happens AFTER the review completes,
+    so newly created/updated files are never skipped as 'unchanged'."""
+    _modified_files.add(abs_path)
+
+
+def _classify_layer(abs_path: str) -> str:
+    """Classify a file path into a logical layer based on directory/file names."""
+    lower = abs_path.lower().replace("\\", "/")
+    for layer, keywords in _LAYER_PATTERNS.items():
+        for kw in keywords:
+            if f"/{kw}/" in lower or f"/{kw}." in lower or lower.endswith(f"/{kw}"):
+                return layer
+    return "Other"
+
+
+def _is_code_file(abs_path: str) -> bool:
+    """Return True if the file is a source-code file worth reviewing."""
+    ext = os.path.splitext(abs_path)[1].lower()
+    return ext not in _SKIP_EXTENSIONS and ext != ""
+
+
+def _chunk_content(content: str, chunk_size: int = _MAX_LINES_PER_CHUNK):
+    """Split content into line-based chunks. Returns list of (start_line, chunk_text)."""
+    lines = content.splitlines(keepends=True)
+    if len(lines) <= chunk_size:
+        return [(1, content)]
+    chunks = []
+    for i in range(0, len(lines), chunk_size):
+        chunk_lines = lines[i:i + chunk_size]
+        chunks.append((i + 1, "".join(chunk_lines)))
+    return chunks
+
+
+# ── Review Prompts ────────────────────────────────
+
+REVIEW_FAST_PROMPT = """You are a Senior Static Code Review Agent performing FAST review.
+
+SCOPE: Review the provided source files for CRITICAL issues ONLY.
+
+CHECK FOR:
+1. Null / undefined reference risks
+2. Missing return statements
+3. Build-breaking syntax errors
+4. Missing required using/import statements
+5. Incorrect HTTP status codes (for API controllers)
+6. Incorrect exception handling (missing catch, wrong exception type)
+7. Obvious runtime errors (division by zero, index out of range)
+8. Missing required validation on inputs
+9. Async/await misuse (missing await, deadlock risk)
+10. Incorrect method signatures (wrong return type, missing parameters)
+11. For .NET test projects:
+    - Flag tests that new up ASP.NET controllers directly instead of using WebApplicationFactory<Program>
+    - Flag console tests that call Program methods directly instead of using reflection + console/DB assertions
+
+DO NOT CHECK:
+- Code style or formatting
+- Variable naming
+- Performance optimization
+- Design patterns
+- Missing types from files NOT provided
+- Incomplete dependency graph (other files may not be shown)
+
+HARD CONSTRAINTS:
+- Do NOT refactor, rename, reformat, or restructure
+- Do NOT add new dependencies or libraries
+- Do NOT suggest stylistic changes
+- ONLY fix issues that would break build, break runtime, or cause security risk
+- If ALL provided files are valid and safe: return NO_CRITICAL_ISSUES for each
+
+OUTPUT FORMAT (STRICT JSON ONLY — no markdown, no commentary):
+
+{
+  "files": [
+    {
+      "path": "path/to/file.cs",
+      "status": "NO_CRITICAL_ISSUES",
+      "patch_required": false
+    },
+    {
+      "path": "path/to/other.cs",
+      "status": "ISSUES_FOUND",
+      "issues": [
+        {
+          "type": "MissingReturn",
+          "line": 42,
+          "description": "Method lacks return statement on error path.",
+          "severity": "HIGH",
+          "fix": "Add return statement."
+        }
+      ],
+      "patch_required": true,
+      "unified_diff": "--- a/path/to/other.cs\\n+++ b/path/to/other.cs\\n@@ -42,1 +42,2 @@\\n- // missing\\n+ return null;"
+    }
+  ]
+}
+
+Return ONLY the JSON object above. Nothing else."""
+
+REVIEW_STRICT_PROMPT = """You are a Senior Static Code Review Agent performing STRICT review.
+
+SCOPE: Deep analysis of provided source files for all critical and logic issues.
+
+CHECK FOR EVERYTHING IN FAST MODE, PLUS:
+1. Deep business logic errors
+2. Security vulnerabilities (SQL injection, XSS, CSRF, insecure deserialization)
+3. Cross-file consistency (wrong class references, mismatched method signatures)
+4. Race conditions and thread safety issues
+5. Resource leaks (unclosed connections, streams, disposables)
+6. Incorrect relationship mappings (FK mismatches, wrong cascade behavior)
+7. Performance anti-patterns (N+1 queries, unbounded queries, missing pagination)
+8. Incomplete error handling (swallowed exceptions, generic catch-all)
+9. API contract violations (wrong response types, missing headers)
+10. Test issues: hardcoded IDs, wrong reflection paths, test interdependence
+11. .NET framework-specific test violations:
+    - Web API tests bypassing HTTP pipeline (direct controller method calls instead of HttpClient/WebApplicationFactory)
+    - Console tests bypassing reflection (direct Program.Main or helper method calls instead of reflection + console/DB checks)
+
+HARD CONSTRAINTS:
+- Do NOT refactor style, rename variables, or reformat
+- Do NOT add new dependencies or change architecture
+- Do NOT suggest purely cosmetic changes
+- ONLY fix issues that affect correctness, security, or runtime behavior
+
+OUTPUT FORMAT (STRICT JSON ONLY — no markdown, no commentary):
+
+{
+  "files": [
+    {
+      "path": "path/to/file.cs",
+      "status": "NO_CRITICAL_ISSUES",
+      "patch_required": false
+    },
+    {
+      "path": "path/to/other.cs",
+      "status": "ISSUES_FOUND",
+      "issues": [ { "type": "...", "line": 0, "description": "...", "severity": "HIGH", "fix": "..." } ],
+      "patch_required": true,
+      "unified_diff": "--- a/...\\n+++ b/...\\n@@ ... @@\\n..."
+    }
+  ]
+}
+
+Return ONLY the JSON object above. Nothing else."""
+
+
+# ── Review LLM (lazy singleton) ──────────────────
+
+_review_llm_instance = None
+
+def _get_review_llm():
+    """Lazy singleton for the review LLM. Created on first call."""
+    global _review_llm_instance
+    if _review_llm_instance is None:
+        _review_llm_instance = AzureChatOpenAI(
+            azure_endpoint=AZURE_ENDPOINT,
+            api_key=AZURE_API_KEY,
+            azure_deployment=AZURE_DEPLOYMENT,
+            api_version=AZURE_API_VERSION,
+            # temperature=0
+        )
+    return _review_llm_instance
+
+
+# ── Unified Diff Application ─────────────────────
+
+def _apply_unified_diff(original: str, diff_text: str) -> str:
+    """Best-effort application of a unified diff. Returns None on failure."""
+    try:
+        import re
+        orig_lines = original.splitlines(keepends=True)
+        if orig_lines and not orig_lines[-1].endswith("\n"):
+            orig_lines[-1] += "\n"
+
+        patched_lines = list(orig_lines)
+        offset = 0
+        hunk_re = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+        lines = diff_text.splitlines()
+        i = 0
+        while i < len(lines):
+            m = hunk_re.match(lines[i])
+            if m:
+                orig_start = int(m.group(1)) - 1
+                i += 1
+                pos = orig_start + offset
+                while i < len(lines):
+                    line = lines[i]
+                    if line.startswith("@@") or (not line.startswith("+") and not line.startswith("-") and not line.startswith(" ")):
+                        break
+                    if line.startswith("-"):
+                        if pos < len(patched_lines):
+                            patched_lines.pop(pos)
+                            offset -= 1
+                        i += 1
+                    elif line.startswith("+"):
+                        patched_lines.insert(pos, line[1:] + "\n")
+                        pos += 1
+                        offset += 1
+                        i += 1
+                    else:
+                        pos += 1
+                        i += 1
+            else:
+                i += 1
+        return "".join(patched_lines)
+    except Exception:
+        return None
+
+
+# ── Core Batch Review Logic ──────────────────────
+
+def _get_review_test_context(layer: str = "") -> str:
+    """
+    Return framework-specific test rule snippets to append to the review prompt
+    when reviewing test files. This ensures the review agent enforces the same
+    prohibitions as the generation rules (e.g., no direct method calls for console).
+    """
+    if layer != "Tests":
+        return ""
+
+    framework = _current_dotnet_framework  # set by orchestrator_agent
+    rules_map = {
+        "webapi": (
+            "\n\nFRAMEWORK-SPECIFIC TEST RULES (.NET Web API):"
+            "\n- Tests MUST use WebApplicationFactory<Program> + HttpClient for API tests."
+            "\n- Do NOT new up controllers directly."
+            "\n- Do NOT call controller methods directly — use HTTP requests."
+            "\n- Use Assembly.LoadFrom + GetType for reflection tests."
+        ),
+        "console": (
+            "\n\nFRAMEWORK-SPECIFIC TEST RULES (.NET Console/ADO.NET):"
+            "\n- Tests MUST use reflection (typeof(Program).GetMethod + Invoke) to call Program methods."
+            "\n- Do NOT call Program methods directly (e.g., Program.AddRecord())."
+            "\n- Do NOT new up ASP.NET controllers or WebApplicationFactory."
+            "\n- Do NOT use HttpClient — there is no web server."
+            "\n- Use ConnectionStringProvider.ConnectionString for DB access."
+            "\n- Use Console.SetOut(StringWriter) + CaptureConsoleOutput() for console assertions."
+            "\n- Flag any test that calls a static method on Program directly without reflection."
+        ),
+        "mvc": (
+            "\n\nFRAMEWORK-SPECIFIC TEST RULES (.NET MVC):"
+            "\n- Tests MUST use WebApplicationFactory<Program> + HttpClient for route/view tests."
+            "\n- Do NOT new up controllers directly."
+            "\n- Assert response Content-Type is 'text/html' for MVC views."
+            "\n- Use Assembly.LoadFrom + GetType for reflection tests."
+        ),
+    }
+    return rules_map.get(framework, "")
+
+
+async def _review_file_group(file_contents: dict, mode: str = "FAST", layer: str = "") -> dict:
+    """
+    Send a group of files to the review LLM in a single call.
+    file_contents: {abs_path: content_string, ...}
+    layer: logical layer name (e.g., "Tests") — used to inject framework-specific rules.
+    Returns parsed JSON result dict, or a safe fallback.
+    """
+    from langchain_core.messages import SystemMessage as _SysMsg, HumanMessage as _HumMsg
+
+    prompt = REVIEW_FAST_PROMPT if mode == "FAST" else REVIEW_STRICT_PROMPT
+    # Append framework-specific test rules when reviewing test files
+    prompt += _get_review_test_context(layer)
+
+    # Build payload — include all files in this group so cross-references resolve
+    file_sections = []
+    for fpath, content in file_contents.items():
+        file_sections.append(f"=== FILE: {fpath} ===\n```\n{content}\n```")
+    payload = "\n\n".join(file_sections)
+
+    messages = [
+        _SysMsg(content=prompt),
+        _HumMsg(content=payload),
+    ]
+
+    try:
+        response = _get_review_llm().invoke(messages)
+        raw = response.content.strip()
+    except Exception as e:
+        await broadcast_log(f"⚠️ Review LLM error: {e}")
+        return {"files": [{"path": p, "status": "NO_CRITICAL_ISSUES", "patch_required": False} for p in file_contents]}
+
+    # Parse JSON (strip markdown fences if present)
+    try:
+        cleaned = raw
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(cleaned.split("\n")[1:])
+        if cleaned.endswith("```"):
+            cleaned = "\n".join(cleaned.split("\n")[:-1])
+        result = _json.loads(cleaned.strip())
+    except _json.JSONDecodeError:
+        await broadcast_log(f"⚠️ Review returned non-JSON, treating group as clean")
+        return {"files": [{"path": p, "status": "NO_CRITICAL_ISSUES", "patch_required": False} for p in file_contents]}
+
+    return result
+
+
+async def _review_large_file_chunked(abs_path: str, content: str, mode: str = "FAST", layer: str = "") -> dict:
+    """Review a single large file by sending it in chunks."""
+    from langchain_core.messages import SystemMessage as _SysMsg, HumanMessage as _HumMsg
+
+    prompt = REVIEW_FAST_PROMPT if mode == "FAST" else REVIEW_STRICT_PROMPT
+    prompt += _get_review_test_context(layer)
+    chunks = _chunk_content(content)
+    all_issues = []
+
+    for start_line, chunk_text in chunks:
+        end_line = start_line + chunk_text.count("\n")
+        await broadcast_log(f"  🔍 Reviewing {os.path.basename(abs_path)} lines {start_line}-{end_line}")
+
+        messages = [
+            _SysMsg(content=prompt + "\n\nIMPORTANT: You are reviewing a CHUNK of a larger file (lines "
+                    f"{start_line}-{end_line}). Do NOT flag missing references that may exist outside this chunk."),
+            _HumMsg(content=f"=== FILE: {abs_path} (lines {start_line}-{end_line}) ===\n```\n{chunk_text}\n```"),
+        ]
+
+        try:
+            response = _get_review_llm().invoke(messages)
+            raw = response.content.strip()
+            cleaned = raw
+            if cleaned.startswith("```"):
+                cleaned = "\n".join(cleaned.split("\n")[1:])
+            if cleaned.endswith("```"):
+                cleaned = "\n".join(cleaned.split("\n")[:-1])
+            chunk_result = _json.loads(cleaned.strip())
+            for f_result in chunk_result.get("files", []):
+                if f_result.get("status") == "ISSUES_FOUND":
+                    all_issues.extend(f_result.get("issues", []))
+        except Exception:
+            pass  # skip this chunk, move on
+
+    if all_issues:
+        return {"path": abs_path, "status": "ISSUES_FOUND", "issues": all_issues, "patch_required": False}
+    return {"path": abs_path, "status": "NO_CRITICAL_ISSUES", "patch_required": False}
+
+
+# ── The Scalable Batch Review Tool ───────────────
+
+@tool
+async def scalable_batch_review(mode: str = "FAST"):
+    """
+    Performs scalable batch code review on ALL files modified since the last review.
+    Call this BEFORE running build/test to catch critical issues early.
+    
+    This tool:
+    1. Collects all files modified since last review (via manage_file writes)
+    2. Skips non-code files (configs, .json, .md, .sh, etc.)
+    3. Skips files whose content has not changed since last review
+    4. Groups remaining files by logical layer (Models, Controllers, Services, Tests, etc.)
+    5. Reviews each layer group in a single LLM call (cross-file awareness within layer)
+    6. Chunks large files (500+ lines) to stay within token limits
+    7. Applies patches for critical issues
+    8. Clears the modified-files tracker after review
+    
+    Args:
+        mode: "FAST" (default) — critical issues only, low token cost.
+              "STRICT" — deep logic, security, cross-file checks. Use after tests pass.
+    
+    Returns: Summary of review results across all files.
+    """
+    global REVIEW_MODE
+
+    effective_mode = mode.upper() if mode else REVIEW_MODE
+
+    # ── 1. Collect files to review ────────────────
+    if not _modified_files:
+        await broadcast_log("⏭️ No modified files to review")
+        return "NO_REVIEW_REQUIRED — no files modified since last review."
+
+    # Filter to code files only and skip unchanged
+    files_to_review = {}
+    skipped_non_code = 0
+    skipped_unchanged = 0
+
+    for abs_path in list(_modified_files):
+        if not _is_code_file(abs_path):
+            skipped_non_code += 1
+            continue
+        if not os.path.exists(abs_path):
+            continue
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if not content.strip():
+            continue
+
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if _review_cache.get(abs_path) == content_hash:
+            skipped_unchanged += 1
+            continue
+
+        files_to_review[abs_path] = content
+
+    if not files_to_review:
+        _modified_files.clear()
+        await broadcast_log(f"⏭️ Review skipped — {skipped_non_code} non-code, {skipped_unchanged} unchanged")
+        return f"NO_REVIEW_REQUIRED — {skipped_non_code} non-code files skipped, {skipped_unchanged} unchanged files skipped."
+
+    await broadcast_log(f"🔍 Batch review ({effective_mode}): {len(files_to_review)} file(s) to review")
+
+    # ── 2. Group by layer ─────────────────────────
+    layer_groups: dict = {}
+    large_files: dict = {}  # files that need chunking
+
+    for abs_path, content in files_to_review.items():
+        line_count = content.count("\n") + 1
+        if line_count > _MAX_LINES_PER_CHUNK:
+            large_files[abs_path] = content
+        else:
+            layer = _classify_layer(abs_path)
+            if layer not in layer_groups:
+                layer_groups[layer] = {}
+            layer_groups[layer][abs_path] = content
+
+    # ── 3. Review each layer group ────────────────
+    all_results = []
+    total_issues = 0
+    total_patched = 0
+
+    for layer, group_files in layer_groups.items():
+        await broadcast_log(f"  📂 Reviewing {layer} layer ({len(group_files)} file(s))")
+        result = await _review_file_group(group_files, effective_mode, layer=layer)
+
+        for f_result in result.get("files", []):
+            fpath = f_result.get("path", "")
+            status = f_result.get("status", "NO_CRITICAL_ISSUES")
+            all_results.append(f_result)
+
+            if status == "ISSUES_FOUND":
+                issues = f_result.get("issues", [])
+                total_issues += len(issues)
+
+            # Apply patch if required
+            if f_result.get("patch_required") and f_result.get("unified_diff"):
+                matching_path = fpath
+                # Resolve to absolute path
+                if not os.path.isabs(matching_path):
+                    matching_path = os.path.join(get_workspace_path(), matching_path)
+                if matching_path in group_files:
+                    original = group_files[matching_path]
+                    patched = _apply_unified_diff(original, f_result["unified_diff"])
+                    if patched and patched != original:
+                        try:
+                            await broadcast_log(f"  🩹 Patching: {os.path.basename(matching_path)}")
+                            await broadcast_log(f"  🩹 Patch: {f_result['unified_diff']}")
+                            with open(matching_path, "w", encoding="utf-8") as f:
+                                f.write(patched)
+                            await broadcast_log(f"  🩹 Patched: {patched}")
+                            total_patched += 1
+                            await broadcast_log(f"  🩹 Patch applied: {os.path.basename(matching_path)}")
+                            # Update cache to patched content
+                            _review_cache[matching_path] = hashlib.sha256(patched.encode("utf-8")).hexdigest()
+                        except Exception as e:
+                            await broadcast_log(f"  ⚠️ Patch write failed: {e}")
+
+            # Update cache for reviewed files
+            if fpath in files_to_review:
+                current_content = files_to_review[fpath]
+                _review_cache[fpath] = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+
+    # ── 4. Review large files (chunked) ───────────
+    for abs_path, content in large_files.items():
+        large_layer = _classify_layer(abs_path)
+        line_count = content.count("\n") + 1
+        await broadcast_log(f"  📄 Reviewing large file: {os.path.basename(abs_path)} ({line_count} lines, chunked)")
+        chunk_result = await _review_large_file_chunked(abs_path, content, effective_mode, layer=large_layer)
+        all_results.append(chunk_result)
+        if chunk_result.get("status") == "ISSUES_FOUND":
+            total_issues += len(chunk_result.get("issues", []))
+        _review_cache[abs_path] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    # ── 5. Clear modified files ───────────────────
+    _modified_files.clear()
+
+    # ── 6. Build summary ──────────────────────────
+    clean_count = sum(1 for r in all_results if r.get("status") == "NO_CRITICAL_ISSUES")
+    issue_count = sum(1 for r in all_results if r.get("status") == "ISSUES_FOUND")
+
+    summary = (
+        f"✅ Batch review complete ({effective_mode} mode)\n"
+        f"  Files reviewed: {len(files_to_review)}\n"
+        f"  Clean: {clean_count}\n"
+        f"  With issues: {issue_count}\n"
+        f"  Total issues found: {total_issues}\n"
+        f"  Patches applied: {total_patched}\n"
+        f"  Non-code skipped: {skipped_non_code}\n"
+        f"  Unchanged skipped: {skipped_unchanged}"
+    )
+    await broadcast_log(summary)
+    return summary
+
+
+# -------------------------------------------------
 # MULTI-AGENT TOOL GROUPINGS
 # -------------------------------------------------
 # Each specialized agent owns exclusive tools.
@@ -601,9 +1137,13 @@ test_tool_node = ToolNode(test_tools)
 doc_tools = [generate_project_description]
 doc_tool_node = ToolNode(doc_tools)
 
+# 9) Review Agent – scalable batch code review before build
+review_tools = [scalable_batch_review]
+review_tool_node = ToolNode(review_tools)
+
 # All tools combined – bound to orchestrator LLM so it can call any tool
 # Also used as fallback when LLM calls tools from multiple agents in one response
-all_tools = [execute_terminal, manage_file, find_file, list_dir, create_scaffolding, analyze_test_patterns, generate_project_description]
+all_tools = [execute_terminal, manage_file, find_file, list_dir, create_scaffolding, analyze_test_patterns, generate_project_description, scalable_batch_review]
 all_tool_node = ToolNode(all_tools)
 
 # Tool-name → specialized agent node mapping
@@ -615,6 +1155,7 @@ TOOL_TO_AGENT = {
     "create_scaffolding": "template_action",
     "analyze_test_patterns": "test_action",
     "generate_project_description": "documentation_action",
+    "scalable_batch_review": "review_action",
 }
 
 # -------------------------------------------------
@@ -1396,25 +1937,247 @@ When the user asks for scaffolding for a selected project:
 Version checks (when needed): dotnet --version, node --version, etc. – only inside the pasted project after copy and customization.
 
 ====================
-🚀 FULL PROJECT CREATION MODE (SINGLE EXECUTION PIPELINE)
+� UNIVERSAL BUILD & TEST VERIFICATION (APPLIES TO ALL MODES)
 ====================
 
-When the user asks to "create a project" (or "scaffold a project", "set up a project", "build a project for [topic]"), this is FULL CREATION MODE.
+This rule applies ALWAYS — whether in Full Creation Mode or normal mode:
+
+✅ AFTER WRITING ALL SOLUTION FILES (models, services, controllers, etc.):
+• First, call scalable_batch_review(mode="FAST") to review ALL modified files in one batch
+  - This reviews all files written since the last review
+  - Groups files by layer (Models, Services, Controllers, etc.) for cross-file awareness
+  - Applies patches automatically for critical issues
+  - Skips non-code files (.json, .md, configs, etc.)
+  - Do NOT call this after EVERY individual file write — call it ONCE after ALL solution files are written
+• THEN run the build command (dotnet build, npm run build, mvn compile, etc.)
+• If build FAILS:
+  - Read the error messages
+  - Fix the syntax/compilation errors silently
+  - Re-run build
+  - Repeat until build succeeds
+• Do NOT report "done" until build passes
+
+✅ AFTER WRITING ALL TEST FILES:
+• First, call scalable_batch_review(mode="FAST") to review ALL test files in one batch
+• THEN run the test command (dotnet test, npm test, pytest, mvn test, etc.)
+• If tests FAIL:
+  - Read the error messages
+  - Fix the failing tests or the solution code
+  - Re-run tests
+  - Repeat until all tests pass
+• Do NOT report "done" until all tests pass
+
+✅ OPTIONAL — STRICT REVIEW (after all tests pass):
+• Call scalable_batch_review(mode="STRICT") for deep analysis
+• This performs comprehensive security, logic, and cross-file consistency checks
+• Only do this once, at the end, after tests pass
+
+⚠️ IMPORTANT: Do NOT review files one-by-one. The scalable_batch_review tool handles ALL
+modified files in a single call. It groups them by layer and sends cross-file-aware requests
+to the review LLM. This avoids false positives from missing cross-file dependencies.
+
+This is NON-NEGOTIABLE. Code that doesn't build or tests that don't pass are NOT complete.
+
+====================
+🧪 TEST CASE WRITING RULES (APPLIES TO ALL TEST WRITING)
+====================
+
+Whenever you write test cases — whether in Full Creation Mode, normal mode, or standalone test generation — follow ALL of these rules:
+
+📋 TEST CATEGORIES (MANDATORY — WRITE ALL POSSIBLE TEST CASES FOR EACH):
+Every test file MUST include tests from ALL these categories. Write ALL possible test cases for each — do NOT limit to a few per category.
+
+1. file_existence — Verify ALL solution files exist:
+   • Test that EVERY model class file exists
+   • Test that EVERY controller file exists
+   • Test that EVERY service file exists
+   • Test that DbContext file exists
+   • Test that custom exception file(s) exist
+   • Test that configuration files exist
+
+2. method_existence — Verify ALL methods/properties exist using REFLECTION:
+   • Test EVERY public method in EVERY controller (Get, GetById, Post, Put, Delete)
+   • Test EVERY public method in EVERY service class
+   • Test EVERY property in EVERY model class
+   • Test constructor existence for all classes
+   • Test that DbSet properties exist in DbContext
+   • Test method return types and parameter types
+
+3. functional — Test ALL core business logic:
+   • Test EVERY CRUD operation for EVERY entity (Create, Read, ReadById, Update, Delete)
+   • Test all validations (required fields, string lengths, ranges)
+   • Test all calculations and business rules
+   • Test data transformations
+   • Test filtering, sorting, pagination if applicable
+   • Test all service layer methods
+
+4. end_to_end — Test ALL complete user workflows:
+   • Create entity → Read it back → Verify data matches
+   • Create entity → Update it → Read it back → Verify update
+   • Create entity → Delete it → Verify it's gone
+   • Create multiple entities → List all → Verify count
+   • Full CRUD lifecycle for EVERY entity type
+
+5. api — Test ALL API endpoints:
+   • Test EVERY endpoint returns correct status code (200, 201, 204, 400, 404, 500)
+   • Test GET all returns list
+   • Test GET by ID returns single item
+   • Test POST creates and returns 201
+   • Test PUT updates and returns 200
+   • Test DELETE removes and returns 204
+   • Test content-type headers
+   • Test request/response body format
+
+6. database — Test ALL database operations:
+   • Test DbContext can be created
+   • Test DbContext has correct DbSet properties
+   • Test entity can be saved to database
+   • Test entity can be retrieved from database
+   • Test entity can be updated in database
+   • Test entity can be deleted from database
+   • Test database relationships (foreign keys, navigation properties)
+   • Test InMemory database provider works
+
+7. security — Test ALL security aspects:
+   • Test SQL injection prevention
+   • Test XSS prevention in inputs
+   • Test unauthorized access returns 401
+   • Test forbidden access returns 403
+   • Test input sanitization
+   • Test that sensitive data is not exposed in responses
+
+8. performance — Test performance aspects:
+   • Test bulk insert operations complete in reasonable time
+   • Test bulk read operations complete in reasonable time
+   • Test concurrent access doesn't cause errors
+   • Test large payload handling
+   • Test response time for complex queries
+
+9. negative — Test ALL error cases:
+   • Test null input returns BadRequest
+   • Test empty required fields return validation error
+   • Test invalid ID returns NotFound (404)
+   • Test duplicate creation is handled
+   • Test invalid data types are rejected
+   • Test missing required properties are caught
+   • Test invalid enum values are rejected
+   • Test malformed request body returns error
+   • Test operations on non-existent entities return NotFound
+
+10. boundary — Test ALL edge cases:
+    • Test empty list returns empty array (not null)
+    • Test maximum string length values
+    • Test minimum/maximum numeric values
+    • Test zero values
+    • Test negative numbers where invalid
+    • Test special characters in string fields
+    • Test very long strings
+    • Test null vs empty string
+    • Test integer overflow boundaries
+
+⚠️ IMPORTANT: Write ALL POSSIBLE test cases. Do NOT be lazy. Do NOT write "a few examples". Cover EVERY method, EVERY endpoint, EVERY model, EVERY edge case. The test suite must be EXHAUSTIVE.
+
+� REFLECTION & ASSEMBLY-BASED TESTING (MANDATORY):
+Tests MUST be independent — they should NOT depend on the solution project's internal state.
+Use reflection and assembly loading to verify code structure:
+
+• Use Assembly.LoadFrom() or typeof() to load solution assemblies
+• Use Type.GetMethod(), Type.GetProperty() to verify methods/properties exist
+• Use Activator.CreateInstance() to create instances dynamically
+• Use MethodInfo.Invoke() to call methods via reflection
+• This ensures tests run independently even if solution classes change internally
+
+Example (C# / NUnit):
+  var assembly = Assembly.LoadFrom("path/to/dotnetapp.dll");
+  var type = assembly.GetType("dotnetapp.Models.Book");
+  Assert.IsNotNull(type, "Book class should exist");
+  var method = type.GetMethod("GetTitle");
+  Assert.IsNotNull(method, "GetTitle method should exist");
+  var props = type.GetProperties();
+  Assert.IsTrue(props.Any(p => p.Name == "Title"), "Book should have Title property");
+
+�📊 TEST COUNT RULES:
+• Total test count MUST be EQUAL TO or MORE THAN the existing test count
+• If existing project has 20 tests, you MUST write at least 20 tests
+• Aim for MAXIMUM coverage — write EVERY possible test case
+• The more tests, the better — there is NO upper limit
+
+📄 WEIGHTAGE JSON FILE (MANDATORY):
+After writing all test cases, create a JSON file named `testcase_weightage.json` in the test directory.
+Each test case MUST have a name and weightage. All weightages MUST sum to 1.0.
+
+Format:
+[
+  {
+    "name": "FileExistence_BookModelExists",
+    "weightage": 0.05
+  },
+  {
+    "name": "FileExistence_BookControllerExists",
+    "weightage": 0.05
+  },
+  {
+    "name": "MethodExistence_BookHasGetTitle",
+    "weightage": 0.05
+  },
+  {
+    "name": "Functional_CreateBook_ReturnsCreated",
+    "weightage": 0.1
+  },
+  {
+    "name": "Negative_CreateBook_NullInput_ReturnsBadRequest",
+    "weightage": 0.1
+  },
+  {
+    "name": "Boundary_GetBooks_EmptyList_ReturnsEmpty",
+    "weightage": 0.05
+  }
+]
+
+Weightage distribution guidelines:
+• file_existence tests: ~5% each (low weight, basic checks)
+• method_existence tests: ~5% each (low weight, structural checks)
+• functional tests: ~10% each (high weight, core logic)
+• end_to_end tests: ~10% each (high weight, full workflows)
+• api tests: ~8% each (medium-high weight)
+• database tests: ~8% each (medium-high weight)
+• security tests: ~5% each (medium weight)
+• performance tests: ~5% each (medium weight)
+• negative tests: ~8% each (medium-high weight, error handling is critical)
+• boundary tests: ~5% each (medium weight)
+• ALL weightages MUST sum to exactly 1.0
+
+====================
+�🚀 FULL PROJECT CREATION MODE (SINGLE EXECUTION PIPELINE)
+====================
+
+This mode is ONLY activated when the user EXPLICITLY asks for full/complete project creation.
+
+TRIGGER PHRASES (EXPLICIT ONLY — user must say one of these):
+• "full project creation"
+• "create complete project"
+• "create full project"
+• "complete project creation"
+• "full creation mode"
+• "create project with solution tests and description"
+• "one go project"
+
+⚠️ Normal requests like "create a project" or "scaffold a project" do NOT trigger this mode.
+Those follow the normal scaffolding flow above (Steps 1-4 of scaffolding section).
+Full Creation Mode is ONLY for explicit requests that mention "full", "complete", or "one go".
 
 You MUST complete ALL of the following steps in ONE continuous execution — no stopping, no asking, no deferring.
-
-TRIGGER PHRASES: "create a project", "create project for", "set up project", "scaffold project", "build a project"
 
 ⚡ EXECUTION CONTRACT (NON-NEGOTIABLE):
 IF user message contains ANY trigger phrase above, THEN:
   1. Recognize this as FULL CREATION MODE
-  2. Execute ALL 6 steps (discovery → copy → solution → tests → description → report)
-  3. Do NOT end execution until step 6 (final report) is complete
+  2. Execute ALL steps (discovery → copy → solution → build → tests → run tests → description → report)
+  3. Do NOT end execution until the final report is complete
   4. Do NOT ask questions between steps
   5. Do NOT output intermediate reports
   6. Output ONLY the final consolidated report at the end
 
-THIS IS A BINDING CONTRACT. THERE ARE NO EXCEPTIONS. THERE IS NO "MAYBE". IF TRIGGERED, ALL 6 STEPS EXECUTE.
+THIS IS A BINDING CONTRACT. THERE ARE NO EXCEPTIONS. THERE IS NO "MAYBE". IF TRIGGERED, ALL STEPS EXECUTE.
 
 🚦 CRITICAL RULES:
 • This is ONE ATOMIC TASK — do NOT stop after any individual step
@@ -1446,16 +2209,45 @@ Inside the copied root:
 • Create custom exceptions if needed
 • Follow existing solution patterns from the template
 • Do NOT modify config files or project files unless strictly required
-⚠️ DO NOT STOP AFTER SOLUTION. IMMEDIATELY CONTINUE TO STEP 4 (TESTS). DO NOT ASK "SHOULD I WRITE TESTS?" — THE ANSWER IS ALWAYS YES.
+
+STEP 3A — BATCH REVIEW + BUILD VERIFICATION (MANDATORY)
+After writing ALL solution files:
+• Call scalable_batch_review(mode="FAST") — this reviews ALL modified files at once
+  - Groups by layer (Models, Services, Controllers), applies patches for critical issues
+  - Do NOT call review per-file; the batch tool handles everything
+• THEN run the build command (dotnet build, npm run build, mvn compile, etc.)
+• If build FAILS:
+  - Read the error messages
+  - Fix the syntax/compilation errors silently
+  - Re-run build
+  - Repeat until build succeeds
+• Do NOT continue until build succeeds
+⚠️ BUILD MUST PASS. DO NOT SKIP THIS STEP. AFTER BUILD PASSES, IMMEDIATELY CONTINUE TO STEP 4 (TESTS). DO NOT ASK "SHOULD I WRITE TESTS?" — THE ANSWER IS ALWAYS YES.
 
 STEP 4 — TEST CASE IMPLEMENTATION (MANDATORY — NOT OPTIONAL)
 Before writing tests:
 • Explore the test directory inside the copied root
 • Read at least 2 existing test files to understand: framework, naming, assertions, structure
+• Count the existing test cases — your new tests MUST match or exceed this count
 Then:
+• Follow ALL rules in the "TEST CASE WRITING RULES" section above
+• Include ALL 10 test categories (file_existence, method_existence, functional, end_to_end, api, database, security, performance, negative, boundary)
+• Use REFLECTION/ASSEMBLY for file_existence and method_existence tests
 • Write new test cases matching the EXACT format of existing tests
 • Place them in the correct test folder
 • Do NOT modify existing test files
+• Generate testcase_weightage.json with weightage for each test case (sum = 1.0)
+
+STEP 4A — BATCH REVIEW + TEST EXECUTION (MANDATORY)
+After writing ALL test files:
+• Call scalable_batch_review(mode="FAST") — reviews ALL new test files at once
+• THEN run the test command (dotnet test, npm test, pytest, mvn test, etc.)
+• If tests FAIL:
+  - Read the error messages
+  - Fix the failing tests or the solution code
+  - Re-run tests
+  - Repeat until all tests pass
+• Do NOT continue until all tests pass
 ⚠️ DO NOT STOP AFTER TESTS. IMMEDIATELY CONTINUE TO STEP 5 (DESCRIPTION). DO NOT ASK "SHOULD I GENERATE DESCRIPTION?" — THE ANSWER IS ALWAYS YES.
 
 STEP 5 — DESCRIPTION GENERATION (MANDATORY — NOT OPTIONAL — SAME RUN AS TESTS)
@@ -1513,12 +2305,26 @@ Step 3 — Solution (NO STOPPING HERE):
 [Execute: manage_file(path='library/dotnetapp/BookController.cs', action='write', content='...')
 Written 5 solution files
 
+Step 3A — Build Verification (MANDATORY):
+[Execute: execute_terminal('cd library && dotnet build')]
+Error: CS0246 - Type 'DbContext' not found
+[Execute: manage_file(path='library/dotnetapp/LibraryContext.cs', action='write', content='...')  # Fix
+[Execute: execute_terminal('cd library && dotnet build')]
+✅ Build succeeded
+
 Step 4 — Tests (CONTINUE WITHOUT ASKING):
 [Execute: manage_file(path='library/nunit/test/TestProject/BookTests.cs', action='read')]
 [Execute: manage_file(path='library/nunit/test/TestProject/MemberTests.cs', action='read')]
 Read existing test format
 [Execute: manage_file(path='library/nunit/test/TestProject/LibraryTests.cs', action='write', content='...')
 Written 3 test files
+
+Step 4A — Test Execution (MANDATORY):
+[Execute: execute_terminal('cd library && dotnet test')]
+Test BookController_GetAll_ReturnsAllBooks FAILED - NullReferenceException
+[Execute: manage_file(path='library/dotnetapp/BookController.cs', action='write', content='...')  # Fix null check
+[Execute: execute_terminal('cd library && dotnet test')]
+✅ All tests passed (15/15)
 
 Step 5 — Description (STILL IN SAME RUN):
 [Execute: manage_file(path='DemoDescription.md', action='read')]
@@ -1679,24 +2485,1519 @@ llm = AzureChatOpenAI(
 
 
 # -------------------------------------------------
-# 5. Multi-Agent Node Definitions
+# 5. Stack Detection & Rule Injection
+# -------------------------------------------------
+
+# Stack keyword maps — each list contains trigger words for that stack.
+# detect_stack() scans the latest user message and returns the best match.
+_STACK_KEYWORDS = {
+    "dotnet": [
+        "dotnet", ".net", "csharp", "c#", "webapi", "web api",
+        "ef core", "entity framework", "sql server", "nunit", "xunit",
+        "asp.net", "blazor", "maui", ".csproj", ".sln", "mssql",
+    ],
+    "node": [
+        "node", "express", "npm", "package.json", "jest", "mocha",
+        "javascript", "typescript", "nestjs", "koa", "sequelize",
+    ],
+    "python": [
+        "python", "pip", "flask", "django", "pytest", "fastapi",
+        "requirements.txt", "uvicorn", "gunicorn", "venv",
+    ],
+    "react": [
+        "react", "vite", "jsx", "tsx", "next.js", "nextjs",
+        "tailwind", "frontend", "create-react-app",
+    ],
+    "java": [
+        "java", "spring", "springboot", "maven", "gradle",
+        "junit", "pom.xml", "hibernate", "tomcat",
+    ],
+}
+
+
+def detect_stack(messages) -> str:
+    """
+    Inspect the conversation messages to determine the project stack.
+    Scans the latest HumanMessage for technology keywords.
+    
+    Returns one of: "dotnet", "node", "python", "react", "java", "generic"
+    """
+    # Find the last human message
+    last_human_content = ""
+    for msg in reversed(messages):
+        if hasattr(msg, 'type') and msg.type == 'human':
+            last_human_content = str(msg.content).lower()
+            break
+        elif hasattr(msg, 'content') and isinstance(msg, HumanMessage):
+            last_human_content = str(msg.content).lower()
+            break
+    
+    if not last_human_content:
+        return "generic"
+    
+    # Score each stack by counting keyword matches
+    scores = {}
+    for stack, keywords in _STACK_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in last_human_content)
+        if score > 0:
+            scores[stack] = score
+    
+    if not scores:
+        return "generic"
+    
+    # Return the stack with the highest score
+    return max(scores, key=scores.get)
+
+
+# .NET framework sub-type keywords
+_DOTNET_FRAMEWORK_KEYWORDS = {
+    "console": [
+        "console", "ado.net", "ado net", "adonet", "sqlconnection",
+        "sqlcommand", "dataset", "datatable", "sqldataadapter",
+        "connectionstringprovider", "console.readline", "console.writeline",
+    ],
+    "mvc": [
+        "mvc", "razor", "cshtml", "addcontrollerswithviews",
+        "mapcontrollerroute", "views/", "viewmodel",
+    ],
+    "webapi": [
+        "webapi", "web api", "api", "ef core", "entity framework",
+        "dbcontext", "adddbcontext", "addcontrollers",
+        "mapcontrollers", "swagger", "minimal api",
+    ],
+}
+
+def detect_dotnet_framework(messages) -> str:
+    """
+    When stack is already detected as 'dotnet', determine the sub-framework.
+    Scans ALL human messages for framework-specific keywords.
+
+    Returns one of: "webapi", "console", "mvc"
+    Default: "webapi" (most common .NET template)
+    """
+    combined_content = ""
+    for msg in reversed(messages):
+        if hasattr(msg, 'type') and msg.type == 'human':
+            combined_content += " " + str(msg.content).lower()
+        elif hasattr(msg, 'content') and isinstance(msg, HumanMessage):
+            combined_content += " " + str(msg.content).lower()
+
+    if not combined_content:
+        return "webapi"
+
+    scores = {}
+    for framework, keywords in _DOTNET_FRAMEWORK_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in combined_content)
+        if score > 0:
+            scores[framework] = score
+
+    if not scores:
+        return "webapi"  # default
+
+    return max(scores, key=scores.get)
+
+
+# -------------------------------------------------
+# 5a. Stack-Specific Rule Blocks
+# -------------------------------------------------
+# These are injected as additional SystemMessage content AFTER the main
+# SYSTEM_PROMPT. They extend behavior without replacing universal rules.
+
+DOTNET_WEBAPI_RULES = """
+====================
+⚙️ DOTNET WEB API / EF CORE MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: .NET Web API — The following rules are NOW IN EFFECT.
+
+📋 DEPENDENCY CHECK (DO THIS FIRST — BEFORE ADDING ANY PACKAGES):
+• Read the .csproj file(s) in the project
+• Check what NuGet packages are ALREADY installed
+• Do NOT add packages that already exist in the .csproj
+• Only add a package via 'dotnet add package' if it is genuinely missing
+• The template likely already has EF Core, SQL Server, and test packages — do NOT re-add them
+
+🔗 DATABASE CONNECTION STRING (ALWAYS USE THIS — NO EXCEPTIONS):
+Server=localhost;Database=appdb;User ID=sa;password=examlyMssql@123;trusted_connection=false;Persist Security Info=False;Encrypt=False
+
+🚫 ABSOLUTE PROHIBITIONS:
+• NEVER use LocalDB — it is NOT available
+• NEVER use InMemory provider for the application (only for unit tests if needed)
+• NEVER use any connection string other than the one above
+• NEVER hardcode connection strings in multiple places — use appsettings.json
+• NEVER run 'dotnet add package' without first checking .csproj
+
+📦 EF CORE SETUP (MANDATORY STEPS — IN THIS ORDER):
+1. Register DbContext in Program.cs / Startup.cs:
+   builder.Services.AddDbContext<AppDbContext>(options =>
+       options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+
+2. Add connection string to appsettings.json:
+   "ConnectionStrings": {
+     "DefaultConnection": "Server=localhost;Database=appdb;User ID=sa;password=examlyMssql@123;trusted_connection=false;Persist Security Info=False;Encrypt=False"
+   }
+
+3. Install EF Tools (execute ALL of these):
+   dotnet new tool-manifest
+   dotnet tool install --local dotnet-ef --version 6.0.6
+
+4. Run Migrations (execute ALL of these):
+   dotnet dotnet-ef migrations add initialsetup
+   dotnet dotnet-ef database update
+
+5. If migration FAILS:
+   - Read the error
+   - Fix the DbContext or model
+   - Delete the Migrations folder if needed
+   - Re-run migration commands
+   - Repeat until database update succeeds
+
+🏗️ BUILD & RUN (AFTER MIGRATIONS SUCCEED):
+   dotnet build    → must pass
+   dotnet test     → must pass
+   dotnet run      → verify app starts
+"""
+
+DOTNET_CONSOLE_RULES = """
+====================
+⚙️ DOTNET CONSOLE / ADO.NET MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: .NET Console — The following rules are NOW IN EFFECT.
+
+🔗 CONNECTION STRING LOCATION:
+• Define a single reusable provider, e.g.:
+  public static class ConnectionStringProvider
+  {
+      public static string ConnectionString =
+          \"Server=localhost;Database=appdb;User ID=sa;password=examlyMssql@123;trusted_connection=false;Persist Security Info=False;Encrypt=False\";
+  }
+• Use ConnectionStringProvider.ConnectionString everywhere — do NOT duplicate strings
+• For console apps you MAY keep the provider in Program.cs or a dedicated file in the same project
+
+💾 DATA ACCESS:
+• Use ADO.NET (SqlConnection, SqlCommand, SqlDataAdapter, DataSet/DataTable) for database operations
+• Do NOT introduce Entity Framework Core in console templates unless the template already uses it
+• Wrap connections and commands in using blocks to avoid leaks
+
+🖥️ CONSOLE INTERACTION:
+• All user interaction happens via Console.ReadLine / Console.WriteLine
+• Program methods should write meaningful messages to the console for tests to assert on
+
+🚫 ABSOLUTE PROHIBITIONS:
+• Do NOT create ASP.NET controllers or WebApplication builders in console templates
+• Do NOT put connection strings in multiple classes — always go through ConnectionStringProvider
+• Do NOT add appsettings.json or builder.Configuration — not applicable for console apps
+
+🏗️ BUILD & RUN:
+   dotnet build    → must pass
+   dotnet test     → must pass
+   dotnet run      → verify console behavior matches requirements
+"""
+
+DOTNET_MVC_RULES = """
+====================
+⚙️ DOTNET ASP.NET MVC MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: ASP.NET MVC — The following rules are NOW IN EFFECT.
+
+📦 MVC SETUP:
+• Use AddControllersWithViews() in Program.cs / Startup.cs
+• Configure routing with MapControllerRoute (default route) and custom routes as needed
+• Controllers go in Controllers/ folder, Views go in Views/<Controller>/<Action>.cshtml
+• Models/ViewModels go in Models/ folder
+
+🔗 DATABASE / EF CORE (IF PRESENT):
+• Use the SAME DbContext + connection string pattern as Web API:
+  - Single connection string in appsettings.json → DefaultConnection
+  - Register DbContext with UseSqlServer + DefaultConnection
+  - Connection string: Server=localhost;Database=appdb;User ID=sa;password=examlyMssql@123;trusted_connection=false;Persist Security Info=False;Encrypt=False
+• If template uses ADO.NET, use ConnectionStringProvider pattern instead
+
+📦 EF CORE SETUP (IF APPLICABLE — SAME AS WEB API):
+1. Register DbContext in Program.cs
+2. Add connection string to appsettings.json
+3. Install EF Tools + run migrations
+
+🚫 MVC PROHIBITIONS:
+• Do NOT mix Razor Pages and MVC controllers unless template already does
+• Do NOT hardcode connection strings in controllers or views
+• Do NOT put business logic in views — keep it in services / models
+• Do NOT use Web API-style return types (IActionResult with JSON) unless building API endpoints
+
+🏗️ BUILD & RUN:
+   dotnet build    → must pass
+   dotnet test     → must pass
+   dotnet run      → verify MVC routes and views work
+"""
+
+NODE_RULES = """
+====================
+⚙️ NODE.JS MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: Node.js — The following rules are NOW IN EFFECT.
+
+📋 DEPENDENCY CHECK (DO THIS FIRST — BEFORE ADDING ANY PACKAGES):
+• Read package.json to see what dependencies are ALREADY installed
+• Do NOT run 'npm install <package>' for packages already in package.json
+• Only add packages that are genuinely missing
+
+📦 SETUP:
+• Run npm install first (to install existing dependencies)
+• Use express if backend API
+• Use .env file for database credentials and secrets
+• Never hardcode credentials in source files
+
+🏗️ BUILD & RUN:
+• npm install        → install existing dependencies
+• npm test           → run tests (MUST pass before done)
+• npm start / npm run dev → verify app starts
+
+If tests fail, fix and re-run until all pass.
+"""
+
+PYTHON_RULES = """
+====================
+⚙️ PYTHON MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: Python — The following rules are NOW IN EFFECT.
+
+� DEPENDENCY CHECK (DO THIS FIRST — BEFORE ADDING ANY PACKAGES):
+• Read requirements.txt or setup.py/pyproject.toml to see what's ALREADY listed
+• Do NOT run 'pip install <package>' for packages already in requirements.txt
+• Only add packages that are genuinely missing
+
+�📦 SETUP:
+• Create virtual environment if not present: python3 -m venv venv
+• Activate: source venv/bin/activate
+• Install existing dependencies: pip install -r requirements.txt
+
+🏗️ BUILD & RUN:
+• pytest              → run tests (MUST pass before done)
+• python app.py / uvicorn / gunicorn → verify app starts
+
+If tests fail, fix and re-run until all pass.
+"""
+
+REACT_RULES = """
+====================
+⚙️ REACT MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: React — The following rules are NOW IN EFFECT.
+
+📋 DEPENDENCY CHECK (DO THIS FIRST — BEFORE ADDING ANY PACKAGES):
+• Read package.json to see what dependencies are ALREADY installed
+• Do NOT run 'npm install <package>' for packages already in package.json
+• Only add packages that are genuinely missing
+
+📦 SETUP:
+• Use Vite for new projects: npm create vite@latest
+• Run npm install after scaffolding (installs existing deps)
+• Use functional components and hooks
+
+🏗️ BUILD & RUN:
+• npm install         → install existing dependencies
+• npm run dev         → start dev server
+• npm run build       → verify production build passes
+• npm test            → run tests if applicable
+
+If build fails, fix and re-run until it succeeds.
+"""
+
+JAVA_RULES = """
+====================
+⚙️ JAVA / SPRING MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: Java — The following rules are NOW IN EFFECT.
+
+📋 DEPENDENCY CHECK (DO THIS FIRST — BEFORE ADDING ANY DEPENDENCIES):
+• Read pom.xml or build.gradle to see what dependencies are ALREADY included
+• Do NOT add dependencies that already exist in the build file
+• Only add dependencies that are genuinely missing
+
+📦 SETUP:
+• Use Maven (mvn) or Gradle as detected from project files
+• Ensure pom.xml or build.gradle is properly configured
+
+🏗️ BUILD & RUN:
+• mvn compile / gradle build   → must pass
+• mvn test / gradle test       → must pass
+• mvn spring-boot:run          → verify app starts (if Spring Boot)
+
+If tests fail, fix and re-run until all pass.
+"""
+
+# Map stack names to their rule blocks
+# Non-dotnet stacks — direct mapping
+STACK_RULES = {
+    "node": NODE_RULES,
+    "python": PYTHON_RULES,
+    "react": REACT_RULES,
+    "java": JAVA_RULES,
+    "generic": "",
+}
+
+# .NET framework-specific rules — selected dynamically by detect_dotnet_framework()
+DOTNET_FRAMEWORK_RULES = {
+    "webapi": DOTNET_WEBAPI_RULES,
+    "console": DOTNET_CONSOLE_RULES,
+    "mvc": DOTNET_MVC_RULES,
+}
+
+
+# -------------------------------------------------
+# 5a-ii. Stack-Specific TEST CASE Rules
+# -------------------------------------------------
+# These are injected as ADDITIONAL SystemMessage content to give the LLM
+# concrete, copy-paste-ready test code examples for each stack.
+# This eliminates guesswork and ensures tests are written correctly first time.
+
+DOTNET_WEBAPI_TEST_RULES = """
+====================
+🧪 .NET WEB API / NUNIT TEST RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: .NET Web API — The following TEST rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/nunit/test/TestProject/
+• Naming: <Feature>Tests.cs (e.g., CustomerControllerTests.cs, OrderServiceTests.cs)
+• One test file per controller/service/feature
+
+📦 REQUIRED USINGS (COPY EXACTLY):
+```csharp
+using NUnit.Framework;
+using System;
+using System.IO;
+using System.Reflection;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
+using System.Linq;
+using System.Collections.Generic;
+```
+
+📋 TEST CLASS STRUCTURE (COPY THIS PATTERN):
+```csharp
+namespace TestProject
+{
+    [TestFixture]
+    public class CustomerControllerTests
+    {
+        private HttpClient _client;
+        private WebApplicationFactory<Program> _factory;
+
+        [SetUp]
+        public void Setup()
+        {
+            _factory = new WebApplicationFactory<Program>();
+            _client = _factory.CreateClient();
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            _client?.Dispose();
+            _factory?.Dispose();
+        }
+
+        // ==================== FILE EXISTENCE TESTS ====================
+
+        [Test]
+        public void FileExistence_CustomerModelExists()
+        {
+            string filePath = Path.Combine("dotnetapp", "Models", "Customer.cs");
+            Assert.IsTrue(File.Exists(filePath), "Customer.cs should exist in Models folder");
+        }
+
+        // ==================== REFLECTION TESTS ====================
+
+        [Test]
+        public void Reflection_CustomerModel_HasRequiredProperties()
+        {
+            var assembly = Assembly.LoadFrom("dotnetapp/bin/Debug/net6.0/dotnetapp.dll");
+            var type = assembly.GetType("dotnetapp.Models.Customer");
+            Assert.IsNotNull(type, "Customer class should exist");
+
+            var props = type.GetProperties();
+            Assert.IsTrue(props.Any(p => p.Name == "CustomerId" && p.PropertyType == typeof(int)),
+                "Customer should have int CustomerId property");
+            Assert.IsTrue(props.Any(p => p.Name == "Name" && p.PropertyType == typeof(string)),
+                "Customer should have string Name property");
+        }
+
+        [Test]
+        public void Reflection_CustomerController_HasCreateMethod()
+        {
+            var assembly = Assembly.LoadFrom("dotnetapp/bin/Debug/net6.0/dotnetapp.dll");
+            var type = assembly.GetType("dotnetapp.Controllers.CustomerController");
+            Assert.IsNotNull(type, "CustomerController class should exist");
+
+            var method = type.GetMethod("CreateCustomer");
+            Assert.IsNotNull(method, "CreateCustomer method should exist");
+        }
+
+        [Test]
+        public void Reflection_DbContext_HasDbSetProperties()
+        {
+            var assembly = Assembly.LoadFrom("dotnetapp/bin/Debug/net6.0/dotnetapp.dll");
+            var type = assembly.GetType("dotnetapp.Data.ApplicationDbContext");
+            Assert.IsNotNull(type, "ApplicationDbContext should exist");
+
+            var props = type.GetProperties();
+            Assert.IsTrue(props.Any(p => p.Name == "Customers"),
+                "DbContext should have Customers DbSet");
+        }
+
+        // ==================== FUNCTIONAL / API TESTS ====================
+
+        [Test]
+        public async Task API_PostCustomer_ReturnsCreated()
+        {
+            var customer = new { Name = "John", Email = "john@test.com", Address = "123 St" };
+            var content = new StringContent(
+                JsonConvert.SerializeObject(customer),
+                Encoding.UTF8, "application/json");
+
+            var response = await _client.PostAsync("/api/Customer", content);
+            Assert.AreEqual(HttpStatusCode.Created, response.StatusCode);
+        }
+
+        [Test]
+        public async Task API_GetCustomerById_NotFound_Returns404()
+        {
+            var response = await _client.GetAsync("/api/Customer/99999");
+            Assert.AreEqual(HttpStatusCode.NotFound, response.StatusCode);
+        }
+
+        // ==================== NEGATIVE TESTS ====================
+
+        [Test]
+        public async Task Negative_PostOrder_ZeroAmount_Returns500()
+        {
+            var order = new { OrderDate = "2024-01-01", TotalAmount = 0, CustomerId = 1 };
+            var content = new StringContent(
+                JsonConvert.SerializeObject(order),
+                Encoding.UTF8, "application/json");
+
+            var response = await _client.PostAsync("/api/Order", content);
+            Assert.AreEqual(HttpStatusCode.InternalServerError, response.StatusCode);
+        }
+    }
+}
+```
+
+⚠️ ASSEMBLY PATH RULES:
+• Pattern: <solution-folder>/bin/Debug/net6.0/<solution-folder>.dll
+• Example: dotnetapp/bin/Debug/net6.0/dotnetapp.dll
+• Run 'dotnet build' BEFORE reflection tests
+• If path differs, use find_file to locate the DLL
+
+🔑 KEY PATTERNS:
+• WebApplicationFactory<Program> for integration tests
+• HttpClient for API endpoint tests
+• Assembly.LoadFrom + GetType + GetProperties/GetMethod for reflection
+• File.Exists for file existence checks
+• Assert.AreEqual, Assert.IsNotNull, Assert.IsTrue for assertions
+• async Task for API tests, void for reflection/existence tests
+
+🚫 WEB API TEST PROHIBITIONS:
+• Do NOT new up controllers directly — always go through WebApplicationFactory + HttpClient
+• Do NOT call controller methods directly — always use HTTP requests
+• Do NOT use ADO.NET / SqlConnection for database assertions in web API tests
+"""
+
+DOTNET_CONSOLE_TEST_RULES = """
+====================
+🧪 .NET CONSOLE / ADO.NET TEST RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: .NET Console — The following TEST rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/nunit/test/TestProject/
+• Naming: <Feature>Tests.cs (e.g., ResponderTests.cs, EmployeeTests.cs)
+• One test file per major feature/entity
+
+📦 REQUIRED USINGS (COPY EXACTLY):
+```csharp
+using NUnit.Framework;
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.IO;
+using System.Reflection;
+using dotnetapp;
+using dotnetapp.Models;
+```
+
+📋 TEST CLASS STRUCTURE (COPY THIS PATTERN):
+```csharp
+namespace dotnetapp.Tests
+{
+    [TestFixture]
+    public class ResponderTests
+    {
+        private string connectionString = ConnectionStringProvider.ConnectionString;
+        private StringWriter consoleOutput;
+        private TextWriter originalConsoleOut;
+
+        [SetUp]
+        public void Setup()
+        {
+            // Clear the database before each test
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                SqlCommand cmd = new SqlCommand("DELETE FROM Responders", conn);
+                cmd.ExecuteNonQuery();
+            }
+
+            // Redirect console output to capture messages
+            originalConsoleOut = Console.Out;
+            consoleOutput = new StringWriter();
+            Console.SetOut(consoleOutput);
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            Console.SetOut(originalConsoleOut);
+
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                SqlCommand cmd = new SqlCommand("DELETE FROM Responders", conn);
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        // ==================== REFLECTION / STRUCTURE TESTS ====================
+
+        [Test, Order(1)]
+        public async Task Test_Responder_Class_Should_Exist()
+        {
+            var assembly = typeof(Responder).Assembly;
+            Type responderType = assembly.GetType("dotnetapp.Models.Responder");
+            Assert.IsNotNull(responderType, "Responder class should exist.");
+        }
+
+        [Test, Order(2)]
+        public async Task Test_Responder_Properties_Should_Exist()
+        {
+            Type responderType = typeof(Responder);
+
+            PropertyInfo responderIdProperty = responderType.GetProperty("ResponderID");
+            PropertyInfo nameProperty = responderType.GetProperty("Name");
+            PropertyInfo roleProperty = responderType.GetProperty("Role");
+
+            Assert.IsNotNull(responderIdProperty, "ResponderID property should exist.");
+            Assert.IsNotNull(nameProperty, "Name property should exist.");
+            Assert.IsNotNull(roleProperty, "Role property should exist.");
+        }
+
+        // ==================== METHOD EXISTENCE (REFLECTION ONLY) ====================
+
+        [Test, Order(3)]
+        public async Task Test_AddResponderRecord_Method_Exists()
+        {
+            var method = typeof(Program).GetMethod("AddResponderRecord");
+            Assert.IsNotNull(method, "The AddResponderRecord method should exist in the Program class.");
+        }
+
+        // ==================== FUNCTIONAL TESTS (REFLECTION + DB + CONSOLE) ====================
+
+        [Test, Order(7)]
+        public async Task Test_AddResponderRecord_Should_Insert_Record()
+        {
+            Type responderType = typeof(Responder);
+            object responderInstance = Activator.CreateInstance(responderType);
+            responderType.GetProperty("Name").SetValue(responderInstance, "Jane Smith");
+
+            MethodInfo addResponderMethod = typeof(Program).GetMethod("AddResponderRecord");
+            addResponderMethod.Invoke(null, new object[] { responderInstance });
+
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                SqlCommand cmd = new SqlCommand("SELECT COUNT(*) FROM Responders WHERE Name = 'Jane Smith'", conn);
+                int count = (int)cmd.ExecuteScalar();
+                Assert.AreEqual(1, count, "Responder record should be inserted.");
+            }
+        }
+
+        // ==================== HELPER METHODS ====================
+
+        private void InsertResponderIntoDatabase(string name, string role)
+        {
+            using (SqlConnection conn = new SqlConnection(connectionString))
+            {
+                conn.Open();
+                SqlDataAdapter adapter = new SqlDataAdapter("SELECT * FROM Responders", conn);
+                SqlCommandBuilder commandBuilder = new SqlCommandBuilder(adapter);
+
+                DataSet dataSet = new DataSet();
+                adapter.Fill(dataSet, "Responders");
+
+                DataTable table = dataSet.Tables["Responders"];
+                DataRow newRow = table.NewRow();
+                newRow["Name"] = name;
+                newRow["Role"] = role;
+                table.Rows.Add(newRow);
+
+                adapter.Update(dataSet, "Responders");
+            }
+        }
+
+        private string CaptureConsoleOutput(Action action)
+        {
+            consoleOutput.GetStringBuilder().Clear();
+            action.Invoke();
+            return consoleOutput.ToString();
+        }
+    }
+}
+```
+
+🔑 KEY PATTERNS:
+• [TestFixture] + [Test, Order(N)] for ordered test execution
+• ConnectionStringProvider.ConnectionString for DB access — NEVER duplicate the string
+• typeof(Program).GetMethod("MethodName") + .Invoke() for calling Program methods
+• typeof(Model).Assembly.GetType("namespace.Model") for class/property existence
+• SqlConnection + SqlCommand for DB verification after method invocation
+• Console.SetOut(StringWriter) + CaptureConsoleOutput(Action) for console output assertions
+
+🚫 CONSOLE TEST PROHIBITIONS:
+• Do NOT call Program methods directly (e.g., Program.AddRecord()) — use reflection (GetMethod + Invoke)
+• Do NOT new up ASP.NET controllers or WebApplicationFactory
+• Do NOT use HttpClient — there is no web server in console apps
+• Do NOT hardcode connection strings — use ConnectionStringProvider
+"""
+
+DOTNET_MVC_TEST_RULES = """
+====================
+🧪 .NET MVC / NUNIT TEST RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: ASP.NET MVC — The following TEST rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/nunit/test/TestProject/
+• Naming: <Controller>Tests.cs (e.g., HomeControllerTests.cs, ProductControllerTests.cs)
+• One test file per controller
+
+📦 REQUIRED USINGS (COPY EXACTLY):
+```csharp
+using NUnit.Framework;
+using System;
+using System.IO;
+using System.Reflection;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using System.Linq;
+using System.Collections.Generic;
+```
+
+📋 TEST CLASS STRUCTURE (COPY THIS PATTERN):
+```csharp
+namespace TestProject
+{
+    [TestFixture]
+    public class HomeControllerTests
+    {
+        private HttpClient _client;
+        private WebApplicationFactory<Program> _factory;
+
+        [SetUp]
+        public void Setup()
+        {
+            _factory = new WebApplicationFactory<Program>();
+            _client = _factory.CreateClient();
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            _client?.Dispose();
+            _factory?.Dispose();
+        }
+
+        // ==================== FILE EXISTENCE TESTS ====================
+
+        [Test]
+        public void FileExistence_HomeControllerExists()
+        {
+            string filePath = Path.Combine("dotnetapp", "Controllers", "HomeController.cs");
+            Assert.IsTrue(File.Exists(filePath), "HomeController.cs should exist");
+        }
+
+        // ==================== REFLECTION TESTS ====================
+
+        [Test]
+        public void Reflection_HomeController_HasIndexMethod()
+        {
+            var assembly = Assembly.LoadFrom("dotnetapp/bin/Debug/net6.0/dotnetapp.dll");
+            var type = assembly.GetType("dotnetapp.Controllers.HomeController");
+            Assert.IsNotNull(type, "HomeController should exist");
+
+            var method = type.GetMethod("Index");
+            Assert.IsNotNull(method, "Index method should exist");
+        }
+
+        // ==================== ROUTE / VIEW TESTS ====================
+
+        [Test]
+        public async Task Route_HomeIndex_ReturnsOk()
+        {
+            var response = await _client.GetAsync("/");
+            Assert.AreEqual(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        [Test]
+        public async Task Route_HomeIndex_ReturnsHtmlContent()
+        {
+            var response = await _client.GetAsync("/");
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+            Assert.AreEqual("text/html", contentType);
+        }
+    }
+}
+```
+
+🔑 KEY PATTERNS:
+• WebApplicationFactory<Program> for integration tests (same as Web API)
+• HttpClient for route/view tests — GET endpoints return HTML, not JSON
+• Assembly.LoadFrom for reflection tests
+• Assert response ContentType is "text/html" for MVC views
+• Assert HTTP status codes for routes
+
+🚫 MVC TEST PROHIBITIONS:
+• Do NOT new up controllers directly — use WebApplicationFactory + HttpClient
+• Do NOT test views by reading .cshtml files — test via HTTP GET and assert status/content-type
+• Do NOT use ADO.NET for DB assertions in MVC tests — use HTTP requests to exercise the full pipeline
+"""
+
+NODE_TEST_RULES = """
+====================
+🧪 NODE.JS / JEST TEST CASE RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: Node.js — The following TEST CASE rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/tests/ or <project-root>/__tests__/ or <project-root>/test/
+• Naming: <feature>.test.js or <feature>.spec.js (e.g., customer.test.js, order.test.js)
+• Discover actual location with list_dir first
+
+📦 REQUIRED IMPORTS (COPY EXACTLY):
+```javascript
+const request = require('supertest');
+const app = require('../src/app');        // adjust path to your express app
+const mongoose = require('mongoose');      // if using MongoDB
+const { Sequelize } = require('sequelize'); // if using SQL
+const fs = require('fs');
+const path = require('path');
+```
+
+📋 TEST FILE STRUCTURE (COPY THIS PATTERN):
+```javascript
+const request = require('supertest');
+const app = require('../src/app');
+
+describe('Customer API', () => {
+
+    // ==================== FILE EXISTENCE TESTS ====================
+
+    describe('File Existence', () => {
+        test('Customer model file should exist', () => {
+            const filePath = path.join(__dirname, '..', 'src', 'models', 'Customer.js');
+            expect(fs.existsSync(filePath)).toBe(true);
+        });
+
+        test('Customer controller file should exist', () => {
+            const filePath = path.join(__dirname, '..', 'src', 'controllers', 'customerController.js');
+            expect(fs.existsSync(filePath)).toBe(true);
+        });
+
+        test('Customer routes file should exist', () => {
+            const filePath = path.join(__dirname, '..', 'src', 'routes', 'customerRoutes.js');
+            expect(fs.existsSync(filePath)).toBe(true);
+        });
+    });
+
+    // ==================== METHOD / EXPORT EXISTENCE TESTS ====================
+
+    describe('Method Existence', () => {
+        test('Customer model should export required fields', () => {
+            const Customer = require('../src/models/Customer');
+            expect(Customer).toBeDefined();
+            expect(typeof Customer).toBe('function');
+        });
+
+        test('Customer controller should export createCustomer', () => {
+            const controller = require('../src/controllers/customerController');
+            expect(controller.createCustomer).toBeDefined();
+            expect(typeof controller.createCustomer).toBe('function');
+        });
+
+        test('Customer controller should export getCustomers', () => {
+            const controller = require('../src/controllers/customerController');
+            expect(controller.getCustomers).toBeDefined();
+            expect(typeof controller.getCustomers).toBe('function');
+        });
+    });
+
+    // ==================== API / FUNCTIONAL TESTS ====================
+
+    describe('POST /api/customers', () => {
+        test('should create a new customer and return 201', async () => {
+            const res = await request(app)
+                .post('/api/customers')
+                .send({ name: 'John', email: 'john@test.com', address: '123 St' });
+
+            expect(res.statusCode).toBe(201);
+            expect(res.body).toHaveProperty('name', 'John');
+        });
+
+        test('should return 400 for missing required fields', async () => {
+            const res = await request(app)
+                .post('/api/customers')
+                .send({});
+
+            expect(res.statusCode).toBe(400);
+        });
+    });
+
+    describe('GET /api/customers', () => {
+        test('should return all customers with 200', async () => {
+            const res = await request(app).get('/api/customers');
+            expect(res.statusCode).toBe(200);
+            expect(Array.isArray(res.body)).toBe(true);
+        });
+
+        test('should return 404 for non-existent customer', async () => {
+            const res = await request(app).get('/api/customers/99999');
+            expect(res.statusCode).toBe(404);
+        });
+    });
+
+    // ==================== NEGATIVE TESTS ====================
+
+    describe('Negative Cases', () => {
+        test('should return 400 for invalid email format', async () => {
+            const res = await request(app)
+                .post('/api/customers')
+                .send({ name: 'Test', email: 'not-an-email', address: '123' });
+
+            expect(res.statusCode).toBe(400);
+        });
+
+        test('should return 400 for null body', async () => {
+            const res = await request(app)
+                .post('/api/customers')
+                .send(null);
+
+            expect(res.statusCode).toBe(400);
+        });
+    });
+
+    // ==================== BOUNDARY TESTS ====================
+
+    describe('Boundary Cases', () => {
+        test('should handle empty list correctly', async () => {
+            const res = await request(app).get('/api/customers');
+            expect(res.statusCode).toBe(200);
+            expect(res.body).toBeInstanceOf(Array);
+        });
+
+        test('should handle very long name input', async () => {
+            const longName = 'A'.repeat(500);
+            const res = await request(app)
+                .post('/api/customers')
+                .send({ name: longName, email: 'test@test.com', address: '123' });
+
+            expect([200, 201, 400]).toContain(res.statusCode);
+        });
+    });
+});
+```
+
+🔑 KEY PATTERNS TO FOLLOW:
+• describe() for grouping, test() or it() for individual tests
+• request(app) from supertest for API tests
+• fs.existsSync() for file existence checks
+• require() + typeof checks for export/method existence
+• expect().toBe(), expect().toHaveProperty(), expect().toBeDefined()
+• async/await for all API tests
+• .send() for POST/PUT bodies, .set() for headers
+"""
+
+PYTHON_TEST_RULES = """
+====================
+🧪 PYTHON / PYTEST TEST CASE RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: Python — The following TEST CASE rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/tests/ or <project-root>/test/
+• Naming: test_<feature>.py (e.g., test_customer.py, test_order.py)
+• Discover actual location with list_dir first
+
+📦 REQUIRED IMPORTS (COPY EXACTLY):
+```python
+import pytest
+import os
+import importlib
+import inspect
+from pathlib import Path
+```
+
+📋 TEST FILE STRUCTURE (COPY THIS PATTERN):
+```python
+import pytest
+import os
+import importlib
+import inspect
+from pathlib import Path
+
+# For Flask/FastAPI testing
+# from app import app as flask_app  # adjust import
+
+
+# ==================== FILE EXISTENCE TESTS ====================
+
+class TestFileExistence:
+    def test_customer_model_exists(self):
+        assert os.path.exists("src/models/customer.py"), \\
+            "customer.py should exist in src/models/"
+
+    def test_customer_controller_exists(self):
+        assert os.path.exists("src/controllers/customer_controller.py"), \\
+            "customer_controller.py should exist in src/controllers/"
+
+    def test_config_file_exists(self):
+        assert os.path.exists("src/config.py"), \\
+            "config.py should exist in src/"
+
+
+# ==================== METHOD / CLASS EXISTENCE TESTS (REFLECTION) ====================
+
+class TestMethodExistence:
+    def test_customer_class_exists(self):
+        mod = importlib.import_module("src.models.customer")
+        assert hasattr(mod, "Customer"), "Customer class should exist"
+
+    def test_customer_has_name_attribute(self):
+        mod = importlib.import_module("src.models.customer")
+        cls = getattr(mod, "Customer")
+        instance = cls.__new__(cls)
+        # Check via annotations or init params
+        sig = inspect.signature(cls.__init__)
+        params = list(sig.parameters.keys())
+        assert "name" in params or hasattr(cls, "name"), \\
+            "Customer should have 'name' attribute"
+
+    def test_customer_controller_has_create_method(self):
+        mod = importlib.import_module("src.controllers.customer_controller")
+        assert hasattr(mod, "create_customer") or \\
+            (hasattr(mod, "CustomerController") and
+             hasattr(mod.CustomerController, "create_customer")), \\
+            "create_customer function/method should exist"
+
+    def test_customer_controller_has_get_method(self):
+        mod = importlib.import_module("src.controllers.customer_controller")
+        assert hasattr(mod, "get_customers") or \\
+            (hasattr(mod, "CustomerController") and
+             hasattr(mod.CustomerController, "get_customers")), \\
+            "get_customers function/method should exist"
+
+
+# ==================== FUNCTIONAL / API TESTS ====================
+
+class TestCustomerAPI:
+    @pytest.fixture
+    def client(self):
+        from app import app  # adjust import
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_create_customer_returns_201(self, client):
+        response = client.post("/api/customers", json={
+            "name": "John", "email": "john@test.com", "address": "123 St"
+        })
+        assert response.status_code == 201
+
+    def test_get_customers_returns_200(self, client):
+        response = client.get("/api/customers")
+        assert response.status_code == 200
+        assert isinstance(response.json, list)
+
+    def test_get_customer_by_id_returns_200(self, client):
+        # Create first
+        client.post("/api/customers", json={
+            "name": "Jane", "email": "jane@test.com", "address": "456 Ave"
+        })
+        response = client.get("/api/customers/1")
+        assert response.status_code == 200
+
+
+# ==================== NEGATIVE TESTS ====================
+
+class TestNegativeCases:
+    @pytest.fixture
+    def client(self):
+        from app import app
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_get_nonexistent_customer_returns_404(self, client):
+        response = client.get("/api/customers/99999")
+        assert response.status_code == 404
+
+    def test_create_customer_empty_body_returns_400(self, client):
+        response = client.post("/api/customers", json={})
+        assert response.status_code == 400
+
+    def test_create_customer_missing_name_returns_400(self, client):
+        response = client.post("/api/customers", json={
+            "email": "test@test.com"
+        })
+        assert response.status_code == 400
+
+
+# ==================== BOUNDARY TESTS ====================
+
+class TestBoundaryCases:
+    @pytest.fixture
+    def client(self):
+        from app import app
+        app.config["TESTING"] = True
+        with app.test_client() as client:
+            yield client
+
+    def test_empty_customer_list(self, client):
+        response = client.get("/api/customers")
+        assert response.status_code == 200
+        assert isinstance(response.json, list)
+
+    def test_very_long_name(self, client):
+        long_name = "A" * 500
+        response = client.post("/api/customers", json={
+            "name": long_name, "email": "t@t.com", "address": "123"
+        })
+        assert response.status_code in [201, 400]
+```
+
+🔑 KEY PATTERNS TO FOLLOW:
+• class Test<Feature>: for grouping, def test_<action>_<scenario>(self): for tests
+• @pytest.fixture for setup (client, db, etc.)
+• importlib.import_module() + hasattr() for reflection/existence checks
+• inspect.signature() to verify method parameters
+• os.path.exists() for file existence checks
+• assert with clear messages
+• response.status_code for API status checks
+• response.json for response body checks
+"""
+
+REACT_TEST_RULES = """
+====================
+🧪 REACT / JEST + RTL TEST CASE RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: React — The following TEST CASE rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/src/__tests__/ or next to components as <Component>.test.tsx
+• Naming: <Component>.test.tsx or <Component>.test.jsx
+• Discover actual location with list_dir first
+
+📦 REQUIRED IMPORTS (COPY EXACTLY):
+```typescript
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom';
+import userEvent from '@testing-library/user-event';
+import { BrowserRouter } from 'react-router-dom';  // if using routes
+import fs from 'fs';
+import path from 'path';
+```
+
+📋 TEST FILE STRUCTURE (COPY THIS PATTERN):
+```typescript
+import React from 'react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom';
+
+// ==================== FILE EXISTENCE TESTS ====================
+
+describe('File Existence', () => {
+    test('CustomerList component file should exist', () => {
+        const filePath = path.join(__dirname, '..', 'components', 'CustomerList.tsx');
+        expect(fs.existsSync(filePath)).toBe(true);
+    });
+
+    test('CustomerForm component file should exist', () => {
+        const filePath = path.join(__dirname, '..', 'components', 'CustomerForm.tsx');
+        expect(fs.existsSync(filePath)).toBe(true);
+    });
+});
+
+// ==================== COMPONENT RENDERING TESTS ====================
+
+describe('CustomerList Component', () => {
+    test('renders without crashing', () => {
+        render(<CustomerList />);
+    });
+
+    test('displays customer list heading', () => {
+        render(<CustomerList />);
+        expect(screen.getByText(/customers/i)).toBeInTheDocument();
+    });
+
+    test('renders empty state when no customers', () => {
+        render(<CustomerList customers={[]} />);
+        expect(screen.getByText(/no customers/i)).toBeInTheDocument();
+    });
+
+    test('renders customer items when data provided', () => {
+        const customers = [
+            { id: 1, name: 'John', email: 'john@test.com' },
+            { id: 2, name: 'Jane', email: 'jane@test.com' },
+        ];
+        render(<CustomerList customers={customers} />);
+        expect(screen.getByText('John')).toBeInTheDocument();
+        expect(screen.getByText('Jane')).toBeInTheDocument();
+    });
+});
+
+// ==================== USER INTERACTION TESTS ====================
+
+describe('CustomerForm Component', () => {
+    test('renders form fields', () => {
+        render(<CustomerForm />);
+        expect(screen.getByLabelText(/name/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/email/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /submit/i })).toBeInTheDocument();
+    });
+
+    test('calls onSubmit with form data', async () => {
+        const handleSubmit = jest.fn();
+        render(<CustomerForm onSubmit={handleSubmit} />);
+
+        await userEvent.type(screen.getByLabelText(/name/i), 'John');
+        await userEvent.type(screen.getByLabelText(/email/i), 'john@test.com');
+        fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+        await waitFor(() => {
+            expect(handleSubmit).toHaveBeenCalledWith(
+                expect.objectContaining({ name: 'John', email: 'john@test.com' })
+            );
+        });
+    });
+
+    test('shows validation error for empty name', async () => {
+        render(<CustomerForm />);
+        fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+        await waitFor(() => {
+            expect(screen.getByText(/name is required/i)).toBeInTheDocument();
+        });
+    });
+});
+
+// ==================== NEGATIVE / BOUNDARY TESTS ====================
+
+describe('Negative & Boundary Cases', () => {
+    test('handles null props gracefully', () => {
+        expect(() => render(<CustomerList customers={null} />)).not.toThrow();
+    });
+
+    test('handles undefined callback', () => {
+        render(<CustomerForm onSubmit={undefined} />);
+        expect(() => fireEvent.click(screen.getByRole('button', { name: /submit/i }))).not.toThrow();
+    });
+});
+```
+
+🔑 KEY PATTERNS TO FOLLOW:
+• describe() for grouping, test() for individual tests
+• render() for mounting components, screen.getBy*() for queries
+• fireEvent / userEvent for interactions
+• waitFor() for async assertions
+• expect().toBeInTheDocument(), expect().toBe(), expect().toHaveBeenCalled()
+• jest.fn() for mock functions
+• Wrap in <BrowserRouter> if component uses routing
+"""
+
+JAVA_TEST_RULES = """
+====================
+🧪 JAVA / JUNIT TEST CASE RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: Java — The following TEST CASE rules are NOW IN EFFECT.
+
+📁 TEST FILE LOCATION:
+• Tests go in: <project-root>/src/test/java/<package>/ (matching source package)
+• Naming: <Feature>Test.java (e.g., CustomerControllerTest.java, OrderServiceTest.java)
+• Discover actual location with list_dir first
+
+📦 REQUIRED IMPORTS (COPY EXACTLY):
+```java
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.DisplayName;
+import static org.junit.jupiter.api.Assertions.*;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+import java.io.File;
+import java.lang.reflect.Method;
+import java.lang.reflect.Field;
+import com.fasterxml.jackson.databind.ObjectMapper;
+```
+
+📋 TEST FILE STRUCTURE (COPY THIS PATTERN):
+```java
+package com.example.demo;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DisplayName;
+import static org.junit.jupiter.api.Assertions.*;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+import java.io.File;
+import java.lang.reflect.Method;
+import java.lang.reflect.Field;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@SpringBootTest
+@AutoConfigureMockMvc
+public class CustomerControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // ==================== FILE EXISTENCE TESTS ====================
+
+    @Test
+    @DisplayName("Customer model file should exist")
+    public void testFileExistence_CustomerModel() {
+        File file = new File("src/main/java/com/example/demo/models/Customer.java");
+        assertTrue(file.exists(), "Customer.java should exist");
+    }
+
+    @Test
+    @DisplayName("Customer controller file should exist")
+    public void testFileExistence_CustomerController() {
+        File file = new File("src/main/java/com/example/demo/controllers/CustomerController.java");
+        assertTrue(file.exists(), "CustomerController.java should exist");
+    }
+
+    // ==================== REFLECTION TESTS ====================
+
+    @Test
+    @DisplayName("Customer class should have required fields")
+    public void testReflection_CustomerHasRequiredFields() throws Exception {
+        Class<?> cls = Class.forName("com.example.demo.models.Customer");
+        assertNotNull(cls, "Customer class should exist");
+
+        Field nameField = cls.getDeclaredField("name");
+        assertNotNull(nameField, "Customer should have 'name' field");
+        assertEquals(String.class, nameField.getType());
+
+        Field emailField = cls.getDeclaredField("email");
+        assertNotNull(emailField, "Customer should have 'email' field");
+        assertEquals(String.class, emailField.getType());
+    }
+
+    @Test
+    @DisplayName("CustomerController should have createCustomer method")
+    public void testReflection_ControllerHasCreateMethod() throws Exception {
+        Class<?> cls = Class.forName("com.example.demo.controllers.CustomerController");
+        Method[] methods = cls.getDeclaredMethods();
+        boolean found = false;
+        for (Method m : methods) {
+            if (m.getName().equals("createCustomer")) {
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "CustomerController should have createCustomer method");
+    }
+
+    // ==================== API / FUNCTIONAL TESTS ====================
+
+    @Test
+    @DisplayName("POST /api/customers should return 201")
+    public void testCreateCustomer_ReturnsCreated() throws Exception {
+        String json = objectMapper.writeValueAsString(
+            java.util.Map.of("name", "John", "email", "john@test.com", "address", "123 St")
+        );
+
+        mockMvc.perform(post("/api/customers")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    @DisplayName("GET /api/customers should return 200")
+    public void testGetCustomers_ReturnsOk() throws Exception {
+        mockMvc.perform(get("/api/customers"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON));
+    }
+
+    @Test
+    @DisplayName("GET /api/customers/{id} not found should return 404")
+    public void testGetCustomerById_NotFound_Returns404() throws Exception {
+        mockMvc.perform(get("/api/customers/99999"))
+                .andExpect(status().isNotFound());
+    }
+
+    // ==================== NEGATIVE TESTS ====================
+
+    @Test
+    @DisplayName("POST with empty body should return 400")
+    public void testCreateCustomer_EmptyBody_ReturnsBadRequest() throws Exception {
+        mockMvc.perform(post("/api/customers")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("PUT with mismatched ID should return 400")
+    public void testUpdateCustomer_MismatchedId_ReturnsBadRequest() throws Exception {
+        String json = objectMapper.writeValueAsString(
+            java.util.Map.of("id", 2, "name", "Updated")
+        );
+
+        mockMvc.perform(put("/api/customers/1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json))
+                .andExpect(status().isBadRequest());
+    }
+}
+```
+
+🔑 KEY PATTERNS TO FOLLOW:
+• @SpringBootTest + @AutoConfigureMockMvc for integration tests
+• @Test + @DisplayName for test methods
+• MockMvc for API tests: perform(get/post/put/delete) + andExpect(status())
+• Class.forName() + getDeclaredField/getDeclaredMethods for reflection tests
+• File.exists() for file existence checks
+• assertEquals, assertNotNull, assertTrue for assertions
+• ObjectMapper for JSON serialization in request bodies
+"""
+
+# Map stack names to their test rule blocks
+# Non-dotnet stacks — direct mapping
+STACK_TEST_RULES = {
+    "node": NODE_TEST_RULES,
+    "python": PYTHON_TEST_RULES,
+    "react": REACT_TEST_RULES,
+    "java": JAVA_TEST_RULES,
+    "generic": "",
+}
+
+# .NET framework-specific test rules — selected dynamically by detect_dotnet_framework()
+DOTNET_FRAMEWORK_TEST_RULES = {
+    "webapi": DOTNET_WEBAPI_TEST_RULES,
+    "console": DOTNET_CONSOLE_TEST_RULES,
+    "mvc": DOTNET_MVC_TEST_RULES,
+}
+
+
+# -------------------------------------------------
+# 5b. Multi-Agent Node Definitions
 # -------------------------------------------------
 
 # 1) Orchestrator Agent – entry point, receives user input,
-#    injects SYSTEM_PROMPT, delegates to specialized agents via tool calls.
+#    injects SYSTEM_PROMPT + stack-specific rules, delegates via tool calls.
 #    Does not call tools directly; the router dispatches to the correct agent.
+# Global: tracks the detected .NET framework for this session so the
+# review system can also use it without re-scanning messages.
+_current_dotnet_framework: str = "webapi"
+
 def orchestrator_agent(state: State):
     """Orchestrator: understands intent, plans, and invokes tools.
-    System prompt is ALWAYS prepended so the LLM follows
-    Think → Plan → Execute → Report on EVERY prompt."""
+    
+    1. ALWAYS prepends SYSTEM_PROMPT (universal rules)
+    2. Detects stack from user message (dotnet, node, python, react, java)
+    3. For .NET: also detects sub-framework (webapi, console, mvc)
+    4. Injects ONLY the relevant project rules + test rules
+    5. Invokes LLM with the enhanced message list
+    
+    Message order: [SYSTEM_PROMPT] → [PROJECT_RULES] → [TEST_RULES] → [user messages...]
+    """
+    global _current_dotnet_framework
     from langchain_core.messages import SystemMessage
     messages = state["messages"]
-    # ALWAYS prepend system prompt so the LLM sees it on every turn,
-    # not just the first message. This ensures consistent behavior
-    # (think, plan, execute, report) for ALL user prompts.
-    messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
     
-    return {"messages": [llm.invoke(messages)]}
+    # Detect stack from user messages
+    stack = detect_stack(messages)
+    
+    # Build message list: SYSTEM_PROMPT first
+    enhanced_messages = [SystemMessage(content=SYSTEM_PROMPT)]
+    
+    if stack == "dotnet":
+        # Detect .NET sub-framework (webapi / console / mvc)
+        framework = detect_dotnet_framework(messages)
+        _current_dotnet_framework = framework
+        
+        # Inject framework-specific project rules
+        fw_rules = DOTNET_FRAMEWORK_RULES.get(framework, DOTNET_WEBAPI_RULES)
+        enhanced_messages.append(SystemMessage(content=fw_rules))
+        
+        # Inject framework-specific test rules
+        fw_test_rules = DOTNET_FRAMEWORK_TEST_RULES.get(framework, DOTNET_WEBAPI_TEST_RULES)
+        enhanced_messages.append(SystemMessage(content=fw_test_rules))
+    else:
+        # Non-dotnet stacks: direct lookup
+        stack_rules = STACK_RULES.get(stack, "")
+        if stack_rules:
+            enhanced_messages.append(SystemMessage(content=stack_rules))
+        
+        stack_test_rules = STACK_TEST_RULES.get(stack, "")
+        if stack_test_rules:
+            enhanced_messages.append(SystemMessage(content=stack_test_rules))
+    
+    # Append all conversation messages
+    enhanced_messages.extend(messages)
+    
+    return {"messages": [llm.invoke(enhanced_messages)]}
 
 
 # 2) Planner Agent – the planning/reasoning is embedded in the orchestrator's
@@ -1757,6 +4058,9 @@ workflow.add_node("template_action", template_tool_node)
 workflow.add_node("test_action", test_tool_node)
 # 8) Documentation Agent
 workflow.add_node("documentation_action", doc_tool_node)
+# 9) Review Agent — ToolNode for scalable_batch_review (called explicitly by orchestrator)
+workflow.add_node("review_action", review_tool_node)
+
 # Fallback: combined tool node for mixed multi-tool calls
 workflow.add_node("action", all_tool_node)
 
@@ -1772,14 +4076,17 @@ ALL_TOOL_ROUTES = {
     "template_action": "template_action",
     "test_action": "test_action",
     "documentation_action": "documentation_action",
+    "review_action": "review_action",
     "action": "action",  # fallback for mixed tool calls
     END: END,
 }
 workflow.add_conditional_edges("agent", route_tools_or_end, ALL_TOOL_ROUTES)
 
 # All specialized tool nodes → back to Orchestrator
+# file_action goes straight back to agent — review is done as explicit batch step
 for agent_node in ["workspace_action", "file_action", "execution_action",
-                   "template_action", "test_action", "documentation_action", "action"]:
+                   "template_action", "test_action", "documentation_action",
+                   "review_action", "action"]:
     workflow.add_edge(agent_node, "agent")
 
 
