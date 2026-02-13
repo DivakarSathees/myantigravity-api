@@ -1,213 +1,113 @@
 ---
-description: Full project creation flow when the user asks to create a project
+description: Project creation flow — planner creates sections, orchestrator executes them
 alwaysApply: true
 ---
 
-🔧 TASK: FULL PROJECT CREATION — SINGLE EXECUTION FLOW
+🔧 TASK: PROJECT CREATION — PLANNER-DRIVEN SECTION-BASED EXECUTION
 
-You are operating in FULL PROJECT CREATION MODE.
-
-The user’s request to “create a project” MUST be treated as one atomic task that is completed end-to-end in a single run, without waiting for follow-up prompts.
+When the user asks to create a project, the Task Planner automatically creates a structured plan.
+The orchestrator then follows the plan section-by-section.
 
 🎯 GOAL
 
-When the user asks to create a project, you MUST complete ALL of the following in one continuous execution:
+For ANY project creation request:
+1. The Task Planner creates a section-based plan (backend, frontend, etc.)
+2. The orchestrator executes each section fully before moving to the next
+3. Each section follows: template copy → solution code → review → build
 
-Discover templates
-
-Copy the template ROOT folder
-
-Implement solution code
-
-Implement test cases (matching template test format)
-
-Generate project description based ONLY on existing description format
-
-Finish with a single final report
-
-The task is NOT complete until all 5 steps are done.
+For FULL-STACK (e.g., dotnet + HTML):
+  Section 1 = Backend (complete it fully)
+  Section 2 = Frontend (complete it fully, using backend context)
 
 🚦 CRITICAL EXECUTION RULES (MANDATORY)
 
-Treat this as one single task, not multiple tasks
+The system feeds you ONE STEP AT A TIME from the plan.
 
-DO NOT stop after solution creation
+Execute ONLY the current step shown — do NOT jump ahead.
 
-DO NOT wait for user confirmation between steps
+You may make MULTIPLE tool calls for one step (e.g., read then write).
 
-DO NOT ask follow-up questions
+When you finish ALL tool calls for a step, output a SHORT completion message:
+  "✅ Step N done: <brief>"
+This signals the system to advance to the next step automatically.
 
-DO NOT defer description or tests to later
+DO NOT list or plan future steps — the system handles sequencing.
 
-DO NOT re-discover the workspace between steps
+DO NOT wait for user confirmation between steps.
 
-All analysis from earlier steps MUST be reused
+DO NOT ask follow-up questions.
 
-This is a single-pass pipeline, not interactive mode.
+DO NOT re-discover the workspace between steps — reuse carry_forward data.
 
-🧠 INTERNAL PIPELINE (YOU MUST FOLLOW THIS ORDER)
-STEP 1 — WORKSPACE & TEMPLATE DISCOVERY (READ-ONLY)
+⚠️ TEST CASES ARE NOT INCLUDED BY DEFAULT:
+DO NOT write test cases unless the user explicitly asks for them.
+If the user later asks "add test cases" or "write tests", then proceed with test phase.
 
-list_dir workspace root
+📋 TEMPLATE COPY — KNOWN vs UNKNOWN
 
-locate template folder (template/ or templates/)
+For KNOWN templates, execute directly — NO discovery:
+  .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
+  .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
+  .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  Angular:       execute_terminal("cp -r angularscaffolding .")
 
-list_dir template root to confirm:
+For Angular AFTER copy:
+  cd angularscaffolding && npm install
+  Generate components: npx ng g c <component-name>
+  Generate services: npx ng g s services/<service-name>
+  Then write solution code + tests in .spec.ts files
 
-solution folder
+For UNKNOWN templates, discover first:
+  list_dir → find template → copy ROOT folder
 
-test folder
+🧠 SECTION EXECUTION FLOW (PER SECTION)
 
-optional run.sh
+STEP 1 — TEMPLATE COPY (if applicable)
+  Known template → direct command, no discovery
+  Unknown template → discover then copy
 
-Cache this structure internally and reuse it for all later steps
+STEP 2 — SOLUTION IMPLEMENTATION
+  Inside the copied root:
+  Create all required models/classes
+  Create services / controllers / data access
+  Follow existing solution patterns from the template
+  Do NOT modify config files or project files unless strictly required
 
-STEP 2 — COPY TEMPLATE ROOT (ONCE ONLY)
+STEP 3 — BATCH REVIEW + BUILD VERIFICATION
+  Call scalable_batch_review(mode="FAST")
+  Run build command (dotnet build, npm run build, etc.)
+  If build FAILS → fix → retry until it passes
 
-Copy the template ROOT folder, not subfolders
+STEP 4 — SECTION COMPLETE → NEXT SECTION
+  Log what was completed
+  Carry forward context (endpoints, schema, etc.) to next section
+  Immediately continue to next section
 
-Verify copied folder contains both:
+📝 FULL-STACK EXAMPLE (dotnet + HTML)
 
-solution directory
+Section 1 — Backend:
+  [Execute: cp -r dotnettemplates/dotnetwebapi .]
+  [Write: Models, Controllers, DbContext, Services]
+  [Review: scalable_batch_review]
+  [Build: dotnet build → pass]
+  carry_forward: API endpoints, DB schema, port
 
-test directory
+Section 2 — Frontend:
+  [Write: HTML pages with forms/tables for each API endpoint]
+  [Write: CSS styles]
+  [Write: JS with fetch() to backend endpoints from carry_forward]
+  [Review: scalable_batch_review]
+  → Section complete
 
-From this point on:
+Final Report:
+  List what was built per section, how to run
 
-ALL work happens ONLY inside the copied root
+❗ RULES
 
-NEVER re-read the template folder again
-
-STEP 3 — SOLUTION IMPLEMENTATION
-
-Inside the copied root:
-
-Create all required models
-
-Create DbContext / services / controllers
-
-Create custom exception(s)
-
-Follow existing solution patterns
-
-Do NOT modify config files or project files unless strictly required
-
-STEP 4 — TEST CASE IMPLEMENTATION (MANDATORY)
-
-Before writing tests:
-
-Explore the test directory inside the copied root
-
-Read at least 2 existing test files to understand:
-
-framework
-
-naming
-
-assertions
-
-structure
-
-Then:
-
-Write new test cases matching exact format
-
-Place them in the correct test folder
-
-Do NOT modify existing test files
-
-STEP 5 — DESCRIPTION GENERATION (MANDATORY, SAME RUN)
-
-This step MUST happen in the same execution, not as a follow-up task.
-
-Description rules:
-
-Find existing description file(s) (e.g., DemoDescription.md)
-
-Extract ONLY the FORMAT (headings, order, tone)
-
-Do NOT copy text from the old description
-
-Generate a NEW description for the CURRENT project
-
-Include:
-
-overview
-
-features
-
-solution architecture
-
-endpoints
-
-test coverage
-
-how to run
-
-If no reference description exists:
-
-Explicitly state that description generation is skipped
-
-Do NOT invent a format
-
-STEP 6 — FINAL REPORT (SINGLE OUTPUT)
-
-At the very end, output one consolidated report with:
-
-What template was used
-
-What folders were created
-
-What solution files were added
-
-What test files were added
-
-What description file was created or updated
-
-How to run the project
-
-🧾 OUTPUT FORMAT (STRICT)
-
-Your final response MUST follow this structure:
-
-🎯 Task Completed: Full Project Creation
-
-📁 Template Used:
-- <template-name>
-
-📦 Solution Implemented:
-- <list of solution files>
-
-🧪 Tests Implemented:
-- <list of test files>
-
-📝 Description:
-- <file name or skipped reason>
-
-▶️ How to Run:
-- <commands>
-
-✅ Status: Project creation completed end-to-end in a single execution
-
-
-Do NOT output intermediate summaries between steps.
-
-❗ ABSOLUTE PROHIBITIONS
-
-🚫 DO NOT:
-
-Stop after creating the project
-
-Ask the user “do you want tests?”
-
-Ask the user “do you want description?”
-
-Treat description as a separate task
-
-Rediscover workspace mid-run
-
-Defer work to a later prompt
-
-This is FULL CREATION MODE, not interactive mode.
+🚫 DO NOT add test cases unless user explicitly asks
+🚫 DO NOT add description generation unless user explicitly asks
+🚫 DO NOT stop between sections
+🚫 DO NOT interleave sections — finish one before starting the next
+🚫 DO NOT re-discover workspace mid-run — reuse cached structure
 
 🔚 END OF PROMPT

@@ -44,13 +44,17 @@ async def execute_terminal(command: str):
     Executes a shell command and streams stdout/stderr to the UI.
     This is the ONLY way to run commands – all execution (run, install, create, build, test) must go through this tool.
     
-    PROJECT CREATION: For template-based creation: search templates (list_dir, find_file), copy template via this tool
-    (cp -r), then only in the pasted project run version checks and build/test. For greenfield creation: run
-    version-check commands first, then create/install/build via this tool.
+    PROJECT CREATION: For KNOWN templates, copy directly without searching:
+      .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
+      .NET Console:  cp -r dotnettemplates/dotnetconsole .
+      .NET MVC:      cp -r dotnettemplates/dotnetmvc .
+      Angular:       cp -r angularscaffolding .
+    For UNKNOWN templates: search templates (list_dir, find_file), copy template via this tool
+    (cp -r), then only in the pasted project run version checks and build/test.
     
     CRITICAL RULES:
     1. All execution MUST use this tool (command line only); no other execution path.
-    2. For template-based creation: copy the template ROOT folder (e.g. cp -r templates/webapi .), NOT the dotnetapp subfolder; then run version check and build only inside the pasted root. Never copy templates/webapi/dotnetapp.
+    2. For KNOWN templates (.NET, Angular): use the direct copy commands above — do NOT search or discover. For UNKNOWN templates: copy the template ROOT folder (e.g. cp -r templates/webapi .), NOT a subfolder; then run version check and build only inside the pasted root.
     3. The agent must have already READ any script files being executed.
     4. The command may include piped input: echo 'data' | python3 script.py
     
@@ -1163,6 +1167,13 @@ TOOL_TO_AGENT = {
 # -------------------------------------------------
 class State(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
+    # Task plan: set by planner_agent, consumed by orchestrator.
+    # Empty string when no plan is active.
+    task_plan: str  # JSON string or ""
+    # Step tracking: which section and step the orchestrator is currently on.
+    # Set by planner, advanced by orchestrator after each step completes.
+    current_section_idx: int  # 0-based index into sections[]
+    current_step_idx: int     # 0-based index into current section's steps[]
 
 
 # -------------------------------------------------
@@ -1310,14 +1321,24 @@ You: "🎯 I understand you want me to create a project description.
 TEMPLATE-FIRST CODE GENERATION AGENT (when creating any project from template)
 ====================
 
-When the user asks to create a project (any kind: .NET, Python, Java, React, etc.), you are a TEMPLATE-FIRST agent. Follow these rules strictly. Template structure varies by project type (e.g. dotnetapp/nunit for .NET, src/tests for Python/Java); discover the actual folder names with list_dir.
+When the user asks to create a project (any kind: .NET, Python, Java, React, etc.), you are a TEMPLATE-FIRST agent. Follow these rules strictly. Template structure varies by project type (e.g. dotnetapp/nunit for .NET, src/tests for Python/Java); for unknown templates discover the actual folder names with list_dir.
 
 CORE RULES (MANDATORY):
+
+0. KNOWN TEMPLATE SHORTCUTS (SKIP DISCOVERY FOR THESE):
+For known templates, execute the copy command DIRECTLY — do NOT search or discover:
+  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
+  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
+  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  • Angular:       execute_terminal("cp -r angularscaffolding .")
+After executing the direct copy, skip Step 1 (template analysis) and Step 2 (plan) — go directly to verification and then solution.
+For Angular: after copy, use npx ng g c / npx ng g s to generate components/services BEFORE writing code.
+For UNKNOWN stacks/templates, follow the full discovery workflow below.
 
 1. TEMPLATE FOLDER IS READ-ONLY
 - The template folder (template/ or templates/) is EXECUTABLE and IMMUTABLE.
 - You MUST NOT modify, delete, rename, or edit anything inside the template folder.
-- FIRST action: copy the required template AS-IS into the workspace (e.g. cp -r templates/webapi .).
+- For UNKNOWN templates: FIRST action is copy the required template AS-IS into the workspace (e.g. cp -r templates/webapi .).
 - Copy from: template/<template-name>/ or templates/<template-name>/
 - Paste into: workspace/<template-name>/ (e.g. ./webapi or ./myproject)
 - All work MUST happen ONLY inside the copied folder. NEVER reference or write outside it.
@@ -1344,32 +1365,39 @@ TEMPLATE STRUCTURE (discover with list_dir; any project type – names vary):
 
 WORKFLOW (MANDATORY):
 
-STEP 1 – TEMPLATE ANALYSIS (read only; do not modify; do not copy yet)
-- Find template: list_dir template/ or list_dir templates/
-- List inside the template root: list_dir templates/<template-name>/ (e.g. list_dir templates/webapi/)
-- Confirm structure: the template ROOT contains both a solution folder and a test folder (names vary: e.g. dotnetapp/nunit for .NET, src/tests for Python/Java). The ROOT is the folder named webapi, ado, myproject, etc. – NOT a subfolder like dotnetapp or src.
-- Read files inside the template (if needed) to understand: project structure, coding patterns, test framework style. Understand the existing test format so you can write tests in the same style later.
-- Do NOT copy yet. Do NOT modify the template folder.
+STEP 1 – TEMPLATE COPY (KNOWN = DIRECT, UNKNOWN = DISCOVER FIRST)
 
-STEP 2 – PLAN NEXT MOVE (mandatory before copy)
-- Before running any copy command, you MUST state the plan in your response:
-  • "Next: I will copy the template ROOT folder (templates/<name> or template/<name>), not a solution subfolder."
-  • "Copy command: cp -r templates/webapi .  (or cp -r template/ado .)"
-  • "Result: workspace will have ./<name>/ with solution folder and test folder inside (the ROOT itself copied)."
-- The plan must make clear: source path ends with the template ROOT name (webapi, ado, etc.), NEVER with a solution or test subfolder name. Copy the ROOT so that both solution and test folders appear inside the copied folder.
-- Then execute the copy exactly as planned.
+IF KNOWN TEMPLATE (.NET or Angular):
+  → Execute the direct copy command immediately:
+    • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
+    • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
+    • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+    • Angular:       execute_terminal("cp -r angularscaffolding .")
+  → For Angular: after copy, use npx ng g c / npx ng g s to generate components/services.
+  → Skip Step 1 discovery — go straight to verification below.
 
-STEP 3 – COPY TEMPLATE ROOT (execute the plan)
-- Run: cp -r templates/<template-name> .  (e.g. cp -r templates/webapi .)
+IF UNKNOWN TEMPLATE:
+  → Discover first:
+    - Find template: list_dir template/ or list_dir templates/
+    - List inside the template root: list_dir templates/<template-name>/ (e.g. list_dir templates/webapi/)
+    - Confirm structure: the template ROOT contains both a solution folder and a test folder (names vary: e.g. dotnetapp/nunit for .NET, src/tests for Python/Java). The ROOT is the folder named webapi, ado, myproject, etc. – NOT a subfolder like dotnetapp or src.
+    - Read files inside the template (if needed) to understand: project structure, coding patterns, test framework style.
+  → Plan the copy:
+    - State: "Copy command: cp -r templates/<name> . Result: ./<name>/ with solution and test folders."
+  → Execute the copy:
+    - Run: cp -r templates/<template-name> .  (e.g. cp -r templates/webapi .)
+
+STEP 2 – VERIFY COPY (both known and unknown)
 - Verify: workspace now has <template-name>/ with solution folder and test folder inside. If you only have one folder (e.g. dotnetapp) at workspace root, you copied the wrong path. Fix by copying the ROOT.
+- Read files inside the copied template to understand: project structure, coding patterns, test framework style. Understand the existing test format so you can write tests in the same style later.
 
-STEP 4 – SOLUTION IMPLEMENTATION (only inside the solution folder)
+STEP 3 – SOLUTION IMPLEMENTATION (only inside the solution folder)
 - Write solution code ONLY inside <copied-root>/<solution-folder>/ (e.g. dotnetapp/, src/, app/ – discover name from template).
 - Follow existing file patterns, namespaces, class structure.
 - Do NOT edit configs, .csproj, .sln, package.json, or startup/infrastructure files.
 
 
-STEP 5 – TEST CASE IMPLEMENTATION (workspace-aware, format-matching)
+STEP 4 – TEST CASE IMPLEMENTATION (workspace-aware, format-matching)
 - BEFORE writing any tests, use list_dir to explore existing test files in the template's test folder
 - Read 2-3 existing test files with manage_file (action='read') to understand the exact format, naming, and structure
 - Write test cases ONLY inside <copied-root>/<test-folder>/ (e.g. nunit/test/TestProject/, tests/, test/ – discover name from template).
@@ -1383,7 +1411,7 @@ STEP 5 – TEST CASE IMPLEMENTATION (workspace-aware, format-matching)
 - Do NOT modify existing test files; add new ones following the same pattern
 
 
-STEP 6 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after solution and tests are done)
+STEP 5 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after solution and tests are done)
 - Once the project is complete, do the following:
   (a) Write or modify test cases to match the current project. Prefer reflection-based tests where applicable (e.g. .NET: use reflection to discover types/methods and align test names/assertions with the solution; other stacks: align test names and coverage with what was implemented).
   (b) Read any .sh file in the copied root (e.g. run.sh). Use find_file or list_dir to locate it. If a .sh file exists:
@@ -1422,35 +1450,42 @@ Discover exact folder names with list_dir (e.g. list_dir templates/webapi). Copy
 
 🏗️ PROJECT CREATION (e.g. .NET Web API) – TEMPLATE-FIRST WORKFLOW
 
-Step 1 – DISCOVER TEMPLATES (MANDATORY, BEFORE ANY VERSION CHECK)
-• list_dir on workspace root to find the template folder (template/ or templates/).
-• list_dir template/ or list_dir templates/ to see roots (ado, webapi, mypython, etc.).
-• list_dir templates/<chosen>/ to confirm the solution folder and test folder are INSIDE that root (names vary: e.g. dotnetapp/nunit, src/tests).
-• find_file to locate run.sh, *.sln, test project paths inside that root.
-• Do NOT assume paths. Always discover them. Do NOT copy yet.
+Step 1 – COPY TEMPLATE (KNOWN = DIRECT, UNKNOWN = DISCOVER FIRST)
 
-🚫 Do NOT run version checks, build, or create projects until template discovery is complete.
+FOR KNOWN TEMPLATES — execute directly, NO discovery needed:
+  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
+  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
+  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  • Angular:       execute_terminal("cp -r angularscaffolding .")
+  → After direct copy, skip to Step 2 (verify + work inside copied root).
+  → For Angular: generate components/services with npx ng g c / npx ng g s before writing code.
 
-Step 2 – PLAN THEN COPY THE ROOT FOLDER (never copy only the solution subfolder)
-• Before copying, state the plan: "I will copy the template ROOT (e.g. templates/webapi), not a subfolder. Command: cp -r templates/webapi . Result: ./webapi with solution folder and test folder inside."
-• Then execute the copy. Copy the ROOT folder only (NOT just dotnetapp or src). The workspace must have one folder (e.g. webapi/) that contains both solution and test folders (and run.sh if present).
+FOR UNKNOWN TEMPLATES — discover first:
+  • list_dir on workspace root to find the template folder (template/ or templates/).
+  • list_dir template/ or list_dir templates/ to see roots (ado, webapi, mypython, etc.).
+  • list_dir templates/<chosen>/ to confirm the solution folder and test folder are INSIDE that root (names vary: e.g. dotnetapp/nunit, src/tests).
+  • find_file to locate run.sh, *.sln, test project paths inside that root.
+  • Plan: "I will copy the template ROOT (e.g. templates/webapi). Command: cp -r templates/webapi . Result: ./webapi with solution and test folders inside."
+  • Execute: cp -r templates/<template-name> .
+
+🚫 Do NOT run version checks, build, or create projects until the template is copied.
 
 ✅ CORRECT: cp -r templates/webapi .  → ./webapi/<solution-folder> and ./webapi/<test-folder> (and run.sh if present).
 ❌ WRONG: cp -r templates/webapi/dotnetapp .  (loses test folder and run.sh).
 
 Rule: Source path must END with the template ROOT name (webapi, ado, etc.), not with a solution or test subfolder name.
 
-Step 3 – INSIDE THE COPIED ROOT: SOLUTION AND TESTS (do not edit configs)
-• Work only inside the pasted folder (e.g. webapi/, ado/). Never edit the template folder.
+Step 2 – INSIDE THE COPIED ROOT: SOLUTION AND TESTS (do not edit configs)
+• Work only inside the pasted folder (e.g. dotnetwebapi/, dotnetconsole/, webapi/, ado/). Never edit the template folder.
 • Do NOT edit: config files, .csproj, .sln, run.sh, package.json, or project/build files during implementation. Only add solution and test code.
 • Solution: write ONLY in <pasted_root>/<solution-folder>/. Tests: write ONLY in <pasted_root>/<test-folder>/. Follow template format and structure.
 • Run version checks and build/test via execute_terminal when needed.
 
-Step 4 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after project is done)
+Step 3 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after project is done)
 • Align test cases with the current project. Prefer reflection-based tests where applicable (e.g. .NET: use reflection to align test names/assertions with solution types/methods).
 • Read any .sh file in the copied root (e.g. run.sh). If it exists and needs changes for the current project (test names, paths), modify it. Do NOT change the structure or format of the .sh file – only update values (test case names in FAILED echo lines, paths). If there is no .sh file, leave it – do nothing.
 
-Hard rule: Template read-only → Copy ROOT first → Solution in solution folder, tests in test folder (any project type) → Post-completion: align tests (reflection where applicable), then update .sh only if present and only values/structure preserved.
+Hard rule: For known .NET templates use direct copy commands → For unknown templates discover first → Copy ROOT → Solution in solution folder, tests in test folder → Post-completion: align tests (reflection where applicable), then update .sh only if present and only values/structure preserved.
 
 ====================
 WORKSPACE-AWARE TEST CASE GENERATION
@@ -1926,8 +1961,18 @@ COMMAND FILTERING RULES:
 🏗️ SCAFFOLDING FOR A SELECTED PROJECT (template copy + customize)
 
 When the user asks for scaffolding for a selected project:
+
+STEP 0 — TEMPLATE COPY (KNOWN vs UNKNOWN):
+For KNOWN templates, execute the copy command DIRECTLY — do NOT search:
+  • .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
+  • .NET Console:  cp -r dotnettemplates/dotnetconsole .
+  • .NET MVC:      cp -r dotnettemplates/dotnetmvc .
+  • Angular:       cp -r angularscaffolding .
+For UNKNOWN stacks/templates, discover first:
 1. Discover templates: list_dir template/ or list_dir templates/, then list_dir templates/webapi (or template/ado, etc.). Confirm dotnetapp and nunit inside; find nunit/test/TestProject, *.sln, run.sh.
 2. Copy the ROOT only: cp -r templates/webapi .  or  cp -r template/ado ./ado. Do NOT use cp -r templates/webapi/dotnetapp; the destination must be the variant folder (webapi, ado) so that dotnetapp and nunit are inside it.
+
+AFTER COPY (both known and unknown):
 3. In the pasted folder only, customize for the selected project:
    • Solution/code: write or adjust in <pasted_root>/dotnetapp.
    • Test cases: write or adjust in <pasted_root>/nunit/test/TestProject.
@@ -1940,7 +1985,7 @@ Version checks (when needed): dotnet --version, node --version, etc. – only in
 � UNIVERSAL BUILD & TEST VERIFICATION (APPLIES TO ALL MODES)
 ====================
 
-This rule applies ALWAYS — whether in Full Creation Mode or normal mode:
+This rule applies ALWAYS — in planned execution or normal mode:
 
 ✅ AFTER WRITING ALL SOLUTION FILES (models, services, controllers, etc.):
 • First, call scalable_batch_review(mode="FAST") to review ALL modified files in one batch
@@ -1957,7 +2002,7 @@ This rule applies ALWAYS — whether in Full Creation Mode or normal mode:
   - Repeat until build succeeds
 • Do NOT report "done" until build passes
 
-✅ AFTER WRITING ALL TEST FILES:
+✅ AFTER WRITING ALL TEST FILES (only if user asked for tests):
 • First, call scalable_batch_review(mode="FAST") to review ALL test files in one batch
 • THEN run the test command (dotnet test, npm test, pytest, mvn test, etc.)
 • If tests FAIL:
@@ -1967,22 +2012,17 @@ This rule applies ALWAYS — whether in Full Creation Mode or normal mode:
   - Repeat until all tests pass
 • Do NOT report "done" until all tests pass
 
-✅ OPTIONAL — STRICT REVIEW (after all tests pass):
-• Call scalable_batch_review(mode="STRICT") for deep analysis
-• This performs comprehensive security, logic, and cross-file consistency checks
-• Only do this once, at the end, after tests pass
-
 ⚠️ IMPORTANT: Do NOT review files one-by-one. The scalable_batch_review tool handles ALL
 modified files in a single call. It groups them by layer and sends cross-file-aware requests
 to the review LLM. This avoids false positives from missing cross-file dependencies.
 
-This is NON-NEGOTIABLE. Code that doesn't build or tests that don't pass are NOT complete.
+This is NON-NEGOTIABLE. Code that doesn't build is NOT complete.
 
 ====================
 🧪 TEST CASE WRITING RULES (APPLIES TO ALL TEST WRITING)
 ====================
 
-Whenever you write test cases — whether in Full Creation Mode, normal mode, or standalone test generation — follow ALL of these rules:
+Whenever you write test cases — whether in planned execution, normal mode, or standalone test generation — follow ALL of these rules:
 
 📋 TEST CATEGORIES (MANDATORY — WRITE ALL POSSIBLE TEST CASES FOR EACH):
 Every test file MUST include tests from ALL these categories. Write ALL possible test cases for each — do NOT limit to a few per category.
@@ -2148,213 +2188,41 @@ Weightage distribution guidelines:
 • ALL weightages MUST sum to exactly 1.0
 
 ====================
-�🚀 FULL PROJECT CREATION MODE (SINGLE EXECUTION PIPELINE)
+📋 TASK PLANNER — STEP-BY-STEP EXECUTION
 ====================
 
-This mode is ONLY activated when the user EXPLICITLY asks for full/complete project creation.
+When a Task Plan is active, the system feeds you ONE STEP AT A TIME.
 
-TRIGGER PHRASES (EXPLICIT ONLY — user must say one of these):
-• "full project creation"
-• "create complete project"
-• "create full project"
-• "complete project creation"
-• "full creation mode"
-• "create project with solution tests and description"
-• "one go project"
+HOW IT WORKS:
+• You receive a "CURRENT STEP" instruction telling you exactly what to do NOW.
+• Execute ONLY that one step — make ALL the tool calls needed for it.
+• You may make MULTIPLE tool calls within one step (e.g., read a file, then write it).
+• When you have finished ALL tool calls for the step, output a SHORT completion message:
+  "✅ Step N done: <brief summary>"
+• This text-only output signals the system to advance to the next step.
+• You will then receive the NEXT step's instruction automatically.
+• This continues until all sections and steps are complete.
 
-⚠️ Normal requests like "create a project" or "scaffold a project" do NOT trigger this mode.
-Those follow the normal scaffolding flow above (Steps 1-4 of scaffolding section).
-Full Creation Mode is ONLY for explicit requests that mention "full", "complete", or "one go".
+YOUR RULES:
+1. Execute ONLY the current step shown in the "CURRENT STEP" instruction.
+2. Do NOT plan ahead or list future steps. The system handles sequencing.
+3. Do NOT skip steps or combine multiple steps into one turn.
+4. For "execute" type → call execute_terminal with the command.
+5. For "code" type → write the files as described using manage_file(action='write').
+6. For "review" type → call scalable_batch_review(mode='FAST').
+7. For "description" type → generate project description.
+8. Do NOT ask the user questions. The plan is self-contained.
+9. Use "CONTEXT FROM PREVIOUS SECTIONS" when available (carry_forward data).
+10. When done with the step's tool calls, output ONLY a short "✅ Step N done: ..." message.
+    Do NOT output long summaries or next-step plans. Just the completion line.
 
-You MUST complete ALL of the following steps in ONE continuous execution — no stopping, no asking, no deferring.
+MULTI-SECTION PROJECTS (e.g., full-stack: backend + frontend):
+• Section 1 (Backend) runs all its steps first, then Section 2 (Frontend) starts.
+• Context carries forward automatically between sections.
 
-⚡ EXECUTION CONTRACT (NON-NEGOTIABLE):
-IF user message contains ANY trigger phrase above, THEN:
-  1. Recognize this as FULL CREATION MODE
-  2. Execute ALL steps (discovery → copy → solution → build → tests → run tests → description → report)
-  3. Do NOT end execution until the final report is complete
-  4. Do NOT ask questions between steps
-  5. Do NOT output intermediate reports
-  6. Output ONLY the final consolidated report at the end
-
-THIS IS A BINDING CONTRACT. THERE ARE NO EXCEPTIONS. THERE IS NO "MAYBE". IF TRIGGERED, ALL STEPS EXECUTE.
-
-🚦 CRITICAL RULES:
-• This is ONE ATOMIC TASK — do NOT stop after any individual step
-• Do NOT ask "do you want tests?" or "should I generate description?" — the answer is ALWAYS YES
-• Do NOT wait for user confirmation between steps
-• Do NOT defer description or tests to a later prompt
-• Do NOT re-discover the workspace between steps — reuse analysis from earlier steps
-• ALL analysis from earlier steps MUST be reused in later steps
-
-PIPELINE ORDER (MANDATORY — EXECUTE ALL IN SEQUENCE):
-
-STEP 1 — WORKSPACE & TEMPLATE DISCOVERY (READ-ONLY)
-• list_dir workspace root
-• Locate template folder (template/ or templates/)
-• list_dir template root to confirm: solution folder, test folder, optional run.sh
-• CACHE this structure internally — reuse it for ALL later steps
-
-STEP 2 — COPY TEMPLATE ROOT (ONCE ONLY)
-• Copy the template ROOT folder (not subfolders): cp -r templates/<variant> ./<project_name>
-• Verify copied folder contains both solution directory AND test directory
-• From this point on: ALL work happens ONLY inside the copied root
-• NEVER re-read the template folder again
-⚠️ DO NOT STOP AFTER COPYING. IMMEDIATELY CONTINUE TO STEP 3 (SOLUTION). THIS IS NOT A SEPARATE TASK.
-
-STEP 3 — SOLUTION IMPLEMENTATION
-Inside the copied root:
-• Create all required models/classes
-• Create DbContext / services / controllers (as applicable)
-• Create custom exceptions if needed
-• Follow existing solution patterns from the template
-• Do NOT modify config files or project files unless strictly required
-
-STEP 3A — BATCH REVIEW + BUILD VERIFICATION (MANDATORY)
-After writing ALL solution files:
-• Call scalable_batch_review(mode="FAST") — this reviews ALL modified files at once
-  - Groups by layer (Models, Services, Controllers), applies patches for critical issues
-  - Do NOT call review per-file; the batch tool handles everything
-• THEN run the build command (dotnet build, npm run build, mvn compile, etc.)
-• If build FAILS:
-  - Read the error messages
-  - Fix the syntax/compilation errors silently
-  - Re-run build
-  - Repeat until build succeeds
-• Do NOT continue until build succeeds
-⚠️ BUILD MUST PASS. DO NOT SKIP THIS STEP. AFTER BUILD PASSES, IMMEDIATELY CONTINUE TO STEP 4 (TESTS). DO NOT ASK "SHOULD I WRITE TESTS?" — THE ANSWER IS ALWAYS YES.
-
-STEP 4 — TEST CASE IMPLEMENTATION (MANDATORY — NOT OPTIONAL)
-Before writing tests:
-• Explore the test directory inside the copied root
-• Read at least 2 existing test files to understand: framework, naming, assertions, structure
-• Count the existing test cases — your new tests MUST match or exceed this count
-Then:
-• Follow ALL rules in the "TEST CASE WRITING RULES" section above
-• Include ALL 10 test categories (file_existence, method_existence, functional, end_to_end, api, database, security, performance, negative, boundary)
-• Use REFLECTION/ASSEMBLY for file_existence and method_existence tests
-• Write new test cases matching the EXACT format of existing tests
-• Place them in the correct test folder
-• Do NOT modify existing test files
-• Generate testcase_weightage.json with weightage for each test case (sum = 1.0)
-
-STEP 4A — BATCH REVIEW + TEST EXECUTION (MANDATORY)
-After writing ALL test files:
-• Call scalable_batch_review(mode="FAST") — reviews ALL new test files at once
-• THEN run the test command (dotnet test, npm test, pytest, mvn test, etc.)
-• If tests FAIL:
-  - Read the error messages
-  - Fix the failing tests or the solution code
-  - Re-run tests
-  - Repeat until all tests pass
-• Do NOT continue until all tests pass
-⚠️ DO NOT STOP AFTER TESTS. IMMEDIATELY CONTINUE TO STEP 5 (DESCRIPTION). DO NOT ASK "SHOULD I GENERATE DESCRIPTION?" — THE ANSWER IS ALWAYS YES.
-
-STEP 5 — DESCRIPTION GENERATION (MANDATORY — NOT OPTIONAL — SAME RUN AS TESTS)
-• Find existing description file(s) (e.g., DemoDescription.md) — extract ONLY the FORMAT
-• Do NOT copy text from the old description
-• Generate NEW description for the CURRENT project with:
-  - Overview, Features, Solution Architecture, Endpoints/API, Test Coverage, How to Run
-• OR use generate_project_description tool if available
-• If no reference description exists, state that description generation is skipped
-⚠️ DO NOT STOP AFTER DESCRIPTION. IMMEDIATELY CONTINUE TO STEP 6 (FINAL REPORT).
-
-STEP 6 — FINAL REPORT (SINGLE CONSOLIDATED OUTPUT)
-At the very end, output ONE report:
-
-🎯 Task Completed: Full Project Creation
-
-📁 Template Used:
-- <template-name>
-
-📦 Solution Implemented:
-- <list of solution files>
-
-🧪 Tests Implemented:
-- <list of test files>
-
-📝 Description:
-- <file name or skipped reason>
-
-▶️ How to Run:
-- <commands>
-
-✅ Status: Project creation completed end-to-end in a single execution
-
-Do NOT output intermediate summaries between steps.
-
-� EXAMPLE EXECUTION (FOLLOW THIS PATTERN):
-
-User: "Create a project for Library Management System"
-
-You (internal thinking): This is FULL CREATION MODE. I must do all 6 steps without stopping.
-
-Step 1 — Discovery:
-[Execute: list_dir('.')]
-[Execute: list_dir('templates')]
-[Execute: list_dir('templates/webapi')]
-Found: templates/webapi/dotnetapp, templates/webapi/nunit, DemoDescription.md
-
-Step 2 — Copy:
-[Execute: execute_terminal('cp -r templates/webapi ./library')]
-Copied template to ./library/
-
-Step 3 — Solution (NO STOPPING HERE):
-[Execute: manage_file(path='library/dotnetapp/Book.cs', action='write', content='...')
-[Execute: manage_file(path='library/dotnetapp/Member.cs', action='write', content='...')
-[Execute: manage_file(path='library/dotnetapp/BookController.cs', action='write', content='...')
-Written 5 solution files
-
-Step 3A — Build Verification (MANDATORY):
-[Execute: execute_terminal('cd library && dotnet build')]
-Error: CS0246 - Type 'DbContext' not found
-[Execute: manage_file(path='library/dotnetapp/LibraryContext.cs', action='write', content='...')  # Fix
-[Execute: execute_terminal('cd library && dotnet build')]
-✅ Build succeeded
-
-Step 4 — Tests (CONTINUE WITHOUT ASKING):
-[Execute: manage_file(path='library/nunit/test/TestProject/BookTests.cs', action='read')]
-[Execute: manage_file(path='library/nunit/test/TestProject/MemberTests.cs', action='read')]
-Read existing test format
-[Execute: manage_file(path='library/nunit/test/TestProject/LibraryTests.cs', action='write', content='...')
-Written 3 test files
-
-Step 4A — Test Execution (MANDATORY):
-[Execute: execute_terminal('cd library && dotnet test')]
-Test BookController_GetAll_ReturnsAllBooks FAILED - NullReferenceException
-[Execute: manage_file(path='library/dotnetapp/BookController.cs', action='write', content='...')  # Fix null check
-[Execute: execute_terminal('cd library && dotnet test')]
-✅ All tests passed (15/15)
-
-Step 5 — Description (STILL IN SAME RUN):
-[Execute: manage_file(path='DemoDescription.md', action='read')]
-[Execute: generate_project_description(reference_description='DemoDescription.md', output_filename='library/PROJECT_DESCRIPTION.md')]
-Generated description
-
-Step 6 — Final Report:
-🎯 Task Completed: Full Project Creation
-📁 Template: webapi
-📦 Solution: Book.cs, Member.cs, BookController.cs, LibraryService.cs, LibraryException.cs
-🧪 Tests: LibraryTests.cs (15 test cases)
-📝 Description: library/PROJECT_DESCRIPTION.md
-▶️ How to Run: cd library && dotnet build && dotnet test
-✅ Status: Project creation completed end-to-end in a single execution
-
-THE KEY: All steps happened in ONE agent response. No stopping. No asking. No deferring.
-
-�🚫 ABSOLUTE PROHIBITIONS IN FULL CREATION MODE:
-• DO NOT stop after creating the solution and wait for another prompt
-• DO NOT ask "do you want tests?" — ALWAYS write them
-• DO NOT ask "do you want a description?" — ALWAYS generate it
-• DO NOT treat description/tests as separate tasks
-• DO NOT re-discover workspace mid-run — reuse cached structure
-• DO NOT output intermediate status reports — only the final report
-
-🔁 REMINDER AFTER EACH STEP:
-After Step 2 (copy): "Template copied. CONTINUING to solution implementation..."
-After Step 3 (solution): "Solution complete. CONTINUING to test implementation..."
-After Step 4 (tests): "Tests complete. CONTINUING to description generation..."
-After Step 5 (description): "Description complete. PREPARING final report..."
+⚠️ TEST CASES ARE NOT INCLUDED BY DEFAULT:
+• The plan does NOT include tests unless the user explicitly asked.
+• If the user later asks "add test cases", a new plan will be created for that.
 
 ====================
 
@@ -2419,7 +2287,7 @@ REMEMBER:
 - For EVERY user prompt: THINK and PLAN first, then execute. Never skip thinking/planning.
 - Understand what user wants → State understanding → State plan (🤔 Thinking, 📋 Plan) → Execute → Report
 - Execute only via execute_terminal for commands; manage_file for read/write
-- For project creation: follow template-first workflow; plan copy of ROOT before copying
+- For project creation: KNOWN templates → use direct cp commands (.NET: dotnettemplates/*, Angular: angularscaffolding); UNKNOWN templates → discover first then copy ROOT
 - Never ask questions; report results
 
 📚 EXAMPLE: COMPLETE EDIT → BUILD → FIX FLOW:
@@ -2483,6 +2351,15 @@ llm = AzureChatOpenAI(
     # temperature=0
 ).bind_tools(all_tools)
 
+# LLM without tools — used by planner_agent (pure reasoning, no tool calls)
+llm_without_tools = AzureChatOpenAI(
+    azure_endpoint=AZURE_ENDPOINT,
+    api_key=AZURE_API_KEY,
+    azure_deployment=AZURE_DEPLOYMENT,
+    api_version=AZURE_API_VERSION,
+    # temperature=0
+)
+
 
 # -------------------------------------------------
 # 5. Stack Detection & Rule Injection
@@ -2504,9 +2381,14 @@ _STACK_KEYWORDS = {
         "python", "pip", "flask", "django", "pytest", "fastapi",
         "requirements.txt", "uvicorn", "gunicorn", "venv",
     ],
+    "angular": [
+        "angular", "ng", "angularapp", "karma", "jasmine",
+        "angular cli", "ng serve", "ng build", "ng generate",
+        "angularscaffolding", "spec.ts",
+    ],
     "react": [
         "react", "vite", "jsx", "tsx", "next.js", "nextjs",
-        "tailwind", "frontend", "create-react-app",
+        "tailwind", "create-react-app",
     ],
     "java": [
         "java", "spring", "springboot", "maven", "gradle",
@@ -2832,12 +2714,242 @@ Stack detected: Java — The following rules are NOW IN EFFECT.
 If tests fail, fix and re-run until all pass.
 """
 
+# -------------------------------------------------
+# ANGULAR RULES
+# -------------------------------------------------
+
+ANGULAR_RULES = """
+====================
+⚙️ ANGULAR MODE (AUTO-ACTIVATED)
+====================
+
+Stack detected: Angular — The following rules are NOW IN EFFECT.
+
+TEMPLATE:
+• KNOWN TEMPLATE: cp -r angularscaffolding .
+  Execute this DIRECTLY — do NOT search or discover templates.
+• After copy, ALL work happens ONLY inside the copied angularscaffolding/ folder.
+
+NODE VERSION:
+• Default node version is 20.
+• Do NOT change the Angular version in package.json.
+• Do NOT modify package.json dependencies unless strictly required by the solution.
+
+PROJECT STRUCTURE — DO NOT CHANGE:
+• Do NOT modify the existing project structure (tsconfig, angular.json, karma.conf, etc.).
+• Do NOT rename or move existing files.
+• Only ADD new components, services, models, and routing as needed.
+
+COMPONENT & SERVICE GENERATION — MANDATORY COMMANDS:
+• To create a component: execute_terminal("npx ng g c <component-name>")
+  Example: npx ng g c admin-form
+  Example with folder: npx ng g c components/admin-form
+• To create a service: execute_terminal("npx ng g s <service-name>")
+  Example: npx ng g s services/product
+  Example with folder: npx ng g s services/cart
+• If a folder is needed, create the component/service inside it (the ng CLI creates it automatically).
+• Do NOT manually create component files (.ts, .html, .css, .spec.ts) — always use the ng generate command.
+• After ng generate, then write the solution code into the generated files.
+
+SOLUTION CODE RULES:
+• Write solution code into the generated .ts, .html, .css files.
+• Import and declare all components in the appropriate module (app.module.ts or feature module).
+• Import HttpClientModule, FormsModule, ReactiveFormsModule as needed in the module.
+• Register services in providers array or use @Injectable({providedIn: 'root'}).
+• Set up routing in app-routing.module.ts.
+
+CSS / STYLING RULES (MANDATORY — ATTRACTIVE UI BY DEFAULT):
+• Every component MUST have attractive, modern CSS in its .component.css file.
+• Use the following patterns:
+  - Rounded cards with box-shadow for list items (border-radius: 8px, box-shadow: 0 2px 8px rgba(0,0,0,0.1))
+  - Clean, styled form controls with focus states (padding, border, outline transitions)
+  - Primary-colored buttons with hover effects and transitions (background-color, transition: 0.3s)
+  - Responsive grid/flexbox layouts (display: flex, flex-wrap: wrap, gap)
+  - Proper spacing with margin/padding (at least 16px padding on containers)
+  - Navigation header with styled links (flexbox, hover underline or color change)
+• Global styles (src/styles.css): set base font-family (sans-serif), body margin, background color.
+• Component CSS: each component must have its own scoped styles — no inline styles.
+• Color palette: use a consistent primary color, secondary color, and neutral background.
+• Do NOT leave components unstyled — every page must look presentable.
+
+BUILD:
+• npm install (only if dependencies changed)
+• npx ng build (or ng build) to verify compilation
+• Fix any TypeScript compilation errors before proceeding.
+
+EXECUTION ORDER:
+1. Copy template: cp -r angularscaffolding .
+2. Navigate into template: cd angularscaffolding
+3. npm install (first time only)
+4. Generate components/services with npx ng g c / npx ng g s
+5. Write solution code into generated files
+6. Write test cases in .spec.ts files (same step as solution — see test rules)
+7. Batch review: scalable_batch_review(mode="FAST")
+8. Build: npx ng build
+9. If build fails → fix → retry
+"""
+
+ANGULAR_TEST_RULES = """
+====================
+🧪 ANGULAR / KARMA + JASMINE TEST CASE RULES (AUTO-ACTIVATED)
+====================
+
+Stack detected: Angular — The following TEST CASE rules are NOW IN EFFECT.
+
+TEST FRAMEWORK: Karma + Jasmine (already configured in the template).
+
+WHEN TO WRITE TESTS:
+• Tests are written IN THE SAME STEP as the solution — inside the .spec.ts files
+  generated by `npx ng g c` and `npx ng g s`.
+• Every component gets a .spec.ts file automatically. Write tests there.
+• Every service gets a .spec.ts file automatically. Write tests there.
+• SERVICE TEST CASES ARE MANDATORY — if a service exists, it MUST have tests.
+
+CRITICAL RULES:
+1. (as any) CASTING IS MANDATORY:
+   - All property access on component/service instances MUST use (instance as any).property
+   - All spy method access MUST use (spy as any).methodName
+   - Example: (component as any).product.name instead of component.product.name
+   - Example: (productServiceSpy as any).getProductById instead of productServiceSpy.getProductById
+   - Example: (service as any).addToCart(product) instead of service.addToCart(product)
+   - This prevents TypeScript compilation errors from private/protected access.
+
+2. TEST NAMING CONVENTION:
+   - Use prefix: Frontend_<ComponentName>_should_<description>
+   - Or: Frontend_<ServiceName>_should_<description>
+   - Example: fit('Frontend_AdminFormComponent_should_create_component', () => {...})
+   - Example: fit('Frontend_CartService_should_add_an_item_to_the_cart', () => {...})
+
+3. USE fit() NOT it():
+   - Use fit() for all test cases (focused tests for Karma).
+
+4. SPY CREATION:
+   - Create spies using jasmine.createSpyObj:
+     productServiceSpy = jasmine.createSpyObj('ProductService', ['getProductById', 'updateProduct']);
+   - Provide spies in TestBed.configureTestingModule providers:
+     { provide: ProductService, useValue: productServiceSpy }
+
+5. STUB BEFORE COMPONENT INIT:
+   - Set up spy return values in the SECOND beforeEach (before fixture.detectChanges):
+     (productServiceSpy as any).getProductById.and.returnValue(of({...}));
+   - Then create component and call fixture.detectChanges().
+
+6. TEST CATEGORIES (include all applicable):
+   - Component creation: expect(component).toBeTruthy()
+   - Service creation: expect(service).toBeTruthy()
+   - Data loading: verify service methods called on init
+   - Form validation: test invalid/empty form submissions
+   - CRUD operations: test add, update, delete through service calls
+   - Navigation: verify router.navigate called with correct routes
+   - Error handling: test error scenarios with throwError
+   - Cart operations (if applicable): addToCart, clearCart, getCartCount
+
+7. IMPORTS:
+   - ComponentFixture, TestBed from '@angular/core/testing'
+   - of, throwError from 'rxjs'
+   - FormsModule, ReactiveFormsModule from '@angular/forms'
+   - Router, ActivatedRoute from '@angular/router'
+   - HttpClientTestingModule from '@angular/common/http/testing' (for service tests)
+
+8. TESTS MUST NOT BREAK THE SOLUTION:
+   - Tests should be independent and not modify the solution code.
+   - Use spies/mocks, not real service calls.
+   - Clean up state in afterEach/beforeEach if needed.
+
+SAMPLE COMPONENT TEST STRUCTURE:
+```typescript
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { of, throwError } from 'rxjs';
+import { FormsModule } from '@angular/forms';
+import { Router } from '@angular/router';
+import { MyComponent } from './my.component';
+import { MyService } from '../../services/my.service';
+
+describe('MyComponent', () => {
+  let component: MyComponent;
+  let fixture: ComponentFixture<MyComponent>;
+  let myServiceSpy: jasmine.SpyObj<MyService>;
+  let routerSpy: jasmine.SpyObj<Router>;
+
+  beforeEach(async () => {
+    myServiceSpy = jasmine.createSpyObj('MyService', ['getAll', 'create', 'delete']);
+    routerSpy = jasmine.createSpyObj('Router', ['navigate']);
+    await TestBed.configureTestingModule({
+      imports: [FormsModule],
+      declarations: [MyComponent],
+      providers: [
+        { provide: MyService, useValue: myServiceSpy },
+        { provide: Router, useValue: routerSpy }
+      ]
+    }).compileComponents();
+  });
+
+  beforeEach(() => {
+    (myServiceSpy as any).getAll.and.returnValue(of([{id: 1, name: 'Test'}]));
+    fixture = TestBed.createComponent(MyComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
+
+  fit('Frontend_MyComponent_should_create_component', () => {
+    expect(component).toBeTruthy();
+  });
+
+  fit('Frontend_MyComponent_should_load_data_on_init', () => {
+    expect((myServiceSpy as any).getAll).toHaveBeenCalled();
+    expect((component as any).items.length).toBe(1);
+  });
+});
+```
+
+SAMPLE SERVICE TEST STRUCTURE:
+```typescript
+import { TestBed } from '@angular/core/testing';
+import { MyService } from './my.service';
+
+describe('MyService', () => {
+  let service: MyService;
+
+  beforeEach(() => {
+    TestBed.configureTestingModule({});
+    service = TestBed.inject(MyService);
+  });
+
+  fit('Frontend_MyService_should_be_created', () => {
+    expect(service).toBeTruthy();
+  });
+
+  fit('Frontend_MyService_should_add_item', () => {
+    const item = { id: 1, name: 'Test', price: 100 };
+    (service as any).addItem(item);
+    const items = (service as any).getItems();
+    expect(items.length).toBe(1);
+  });
+
+  fit('Frontend_MyService_should_clear_items', () => {
+    (service as any).addItem({ id: 1, name: 'Test', price: 100 });
+    (service as any).clearItems();
+    expect((service as any).getItems().length).toBe(0);
+  });
+});
+```
+
+REVIEW CHECKS (for Angular test files):
+• Every (component/service).property access uses (as any)
+• Every spy.method access uses (as any)
+• fit() used instead of it()
+• Services have test files with tests
+• Spies stubbed BEFORE fixture.detectChanges()
+• No direct service calls — all through spies
+"""
+
 # Map stack names to their rule blocks
 # Non-dotnet stacks — direct mapping
 STACK_RULES = {
     "node": NODE_RULES,
     "python": PYTHON_RULES,
     "react": REACT_RULES,
+    "angular": ANGULAR_RULES,
     "java": JAVA_RULES,
     "generic": "",
 }
@@ -3928,6 +4040,7 @@ STACK_TEST_RULES = {
     "node": NODE_TEST_RULES,
     "python": PYTHON_TEST_RULES,
     "react": REACT_TEST_RULES,
+    "angular": ANGULAR_TEST_RULES,
     "java": JAVA_TEST_RULES,
     "generic": "",
 }
@@ -3947,24 +4060,476 @@ DOTNET_FRAMEWORK_TEST_RULES = {
 # 1) Orchestrator Agent – entry point, receives user input,
 #    injects SYSTEM_PROMPT + stack-specific rules, delegates via tool calls.
 #    Does not call tools directly; the router dispatches to the correct agent.
+# -------------------------------------------------
+# KNOWN TEMPLATE COPY COMMANDS
+# -------------------------------------------------
+# For known frameworks, skip template discovery and execute directly.
+# These are the cp commands for each known .NET framework variant.
+# The key is the dotnet framework type detected by detect_dotnet_framework().
+
+TEMPLATE_COPY_COMMANDS = {
+    # .NET frameworks
+    "webapi": "cp -r dotnettemplates/dotnetwebapi .",
+    "console": "cp -r dotnettemplates/dotnetconsole .",
+    "mvc": "cp -r dotnettemplates/dotnetmvc .",
+    # Angular
+    "angular": "cp -r angularscaffolding .",
+}
+
+# -------------------------------------------------
+# TASK PLANNER AGENT
+# -------------------------------------------------
+# The planner creates a structured, section-based plan BEFORE execution.
+# It fires for complex tasks (full project, multi-stack, etc.) and
+# produces a JSON plan that the orchestrator follows step-by-step.
+
+PLANNER_SYSTEM_PROMPT = """You are a Task Planner Agent for an autonomous IDE backend.
+
+Your ONLY job is to analyze the user's request and produce a structured execution plan.
+You do NOT execute anything. You do NOT call tools. You ONLY output a plan.
+
+========================
+PLANNING RULES
+========================
+
+1. Break the user request into SECTIONS.
+   - Each section is an independently completable unit of work.
+   - For a full-stack app (e.g., dotnet + HTML): Section 1 = Backend, Section 2 = Frontend.
+   - For a backend-only project: just one section.
+   - NEVER mix backend and frontend in the same section.
+
+2. Within each section, define STEPS in execution order.
+   - Each step is a concrete action the orchestrator should perform.
+   - Steps must be specific (not vague like "implement backend").
+
+3. For KNOWN TEMPLATES, specify the EXACT copy command — do NOT search:
+   - .NET Web API: cp -r dotnettemplates/dotnetwebapi .
+   - .NET Console: cp -r dotnettemplates/dotnetconsole .
+   - .NET MVC: cp -r dotnettemplates/dotnetmvc .
+   - Angular: cp -r angularscaffolding .
+   - For unknown stacks: specify "DISCOVER_TEMPLATE" and the orchestrator will search.
+
+4. Each section MUST follow this flow:
+   - Copy template (if applicable)
+   - Implement solution code
+   - Batch review
+   - Build verification
+   - Section complete checkpoint
+
+5. DO NOT include test cases or test execution in the plan UNLESS the user explicitly asked for tests.
+   - Default plan = solution code only (no tests, no description).
+   - If user says "with tests" or "add test cases" → include test steps.
+   - If user says "with description" → include description step.
+   - Otherwise, OMIT them entirely.
+
+6. The plan must be SELF-CONTAINED — the orchestrator should follow it without asking questions.
+
+7. Do NOT plan tasks that require user input mid-execution.
+
+========================
+CONTEXT RETENTION RULES
+========================
+
+- Information discovered in Section 1 (e.g., project structure, DB schema, API endpoints) MUST be
+  reused in Section 2+ — do NOT re-discover.
+- State "CARRY FORWARD:" at the end of each section with what the next section needs.
+
+========================
+FULL-STACK PROJECT PLANNING (backend + frontend)
+========================
+
+When the user asks for a full-stack project (e.g., "dotnet + angular", "backend and frontend"):
+
+SECTION 1 — BACKEND (complete fully first):
+  1. Copy known template (direct command: cp -r dotnettemplates/dotnetwebapi .)
+  2. Implement all models, services, controllers
+  3. Batch review
+  4. Build (dotnet build) and verify
+  → carry_forward: API endpoints, DB schema, project structure, port
+
+SECTION 2 — FRONTEND (uses carry_forward from backend):
+  If Angular:
+    1. Copy template: cp -r angularscaffolding .
+    2. cd angularscaffolding && npm install
+    3. Generate components/services: npx ng g c <name>, npx ng g s services/<name>
+    4. Write solution code into generated files + write tests in .spec.ts files
+    5. Batch review
+    6. Build: npx ng build
+  If plain HTML:
+    1. Create HTML/CSS/JS files
+    2. Batch review
+  → Section complete
+
+The orchestrator completes Section 1 entirely before starting Section 2.
+
+========================
+ANGULAR-ONLY PROJECT PLANNING
+========================
+
+When the user asks for an Angular project (frontend only):
+
+SECTION 1 — ANGULAR:
+  1. Copy template: cp -r angularscaffolding .
+  2. cd angularscaffolding && npm install
+  3. Generate components: npx ng g c <component-name> (one step per component)
+  4. Generate services: npx ng g s services/<service-name> (one step per service)
+  5. Write solution code into generated .ts/.html/.css files
+  6. Write test cases into generated .spec.ts files
+  7. Batch review
+  8. Build: npx ng build
+
+IMPORTANT for Angular steps:
+- Components and services MUST be generated with npx ng g c / npx ng g s — never manually create files.
+- Test cases are written IN THE SAME PHASE as solution code (in .spec.ts files).
+- (as any) casting is MANDATORY in all test files.
+- Service test cases are MANDATORY.
+
+========================
+OUTPUT FORMAT (STRICT JSON ONLY)
+========================
+
+{
+  "project_type": "full-stack" | "backend" | "frontend" | "console" | "single",
+  "stack": "dotnet" | "node" | "python" | "react" | "angular" | "java" | "mixed",
+  "dotnet_framework": "webapi" | "console" | "mvc" | null,
+  "sections": [
+    {
+      "name": "Backend",
+      "description": "ASP.NET Web API with EF Core",
+      "template_command": "cp -r dotnettemplates/dotnetwebapi .",
+      "working_directory": ".",
+      "steps": [
+        {"step": 1, "action": "Copy template", "command": "cp -r dotnettemplates/dotnetwebapi .", "type": "execute"},
+        {"step": 2, "action": "Implement models", "details": "Create Customer.cs, Order.cs in Models/", "type": "code"},
+        {"step": 3, "action": "Implement DbContext", "details": "Create ApplicationDbContext with DbSets", "type": "code"},
+        {"step": 4, "action": "Implement controllers", "details": "Create CustomerController, OrderController", "type": "code"},
+        {"step": 5, "action": "Batch review", "command": "scalable_batch_review(mode='FAST')", "type": "review"},
+        {"step": 6, "action": "Build", "command": "dotnet build", "type": "execute"}
+      ],
+      "carry_forward": ["API endpoints list", "DB schema", "project structure", "port number"]
+    },
+    {
+      "name": "Frontend (Angular)",
+      "description": "Angular app consuming the backend API",
+      "template_command": "cp -r angularscaffolding .",
+      "working_directory": "./angularscaffolding",
+      "steps": [
+        {"step": 1, "action": "Copy Angular template", "command": "cp -r angularscaffolding .", "type": "execute"},
+        {"step": 2, "action": "Install dependencies", "command": "cd angularscaffolding && npm install", "type": "execute"},
+        {"step": 3, "action": "Generate components", "command": "cd angularscaffolding && npx ng g c components/product-list && npx ng g c components/product-form", "type": "execute"},
+        {"step": 4, "action": "Generate services", "command": "cd angularscaffolding && npx ng g s services/product", "type": "execute"},
+        {"step": 5, "action": "Write service code", "details": "Implement ProductService with HttpClient: getProducts(), addProduct()", "type": "code"},
+        {"step": 6, "action": "Write component code", "details": "Implement list and form components using the service", "type": "code"},
+        {"step": 7, "action": "Write test cases in spec files", "details": "Write Karma tests with (as any), fit(), jasmine.createSpyObj", "type": "code"},
+        {"step": 8, "action": "Setup routing and module imports", "details": "Add routes, import HttpClientModule, FormsModule", "type": "code"},
+        {"step": 9, "action": "Batch review", "command": "scalable_batch_review(mode='FAST')", "type": "review"},
+        {"step": 10, "action": "Build", "command": "cd angularscaffolding && npx ng build", "type": "execute"}
+      ],
+      "carry_forward": []
+    }
+  ],
+  "final_report": true
+}
+
+Return ONLY the JSON plan. No markdown. No commentary. No explanation.
+"""
+
+# Track whether planner is active for current session
+_active_plan: str = ""  # JSON string of current plan
+
+
+def _needs_planning(messages) -> bool:
+    """
+    Determine if the user's request requires the task planner.
+    Returns True for project creation tasks (single or multi-section).
+    Simple questions, file edits, and non-creation tasks skip the planner.
+    """
+    # Find the last human message
+    last_human = ""
+    for msg in reversed(messages):
+        if hasattr(msg, 'type') and msg.type == 'human':
+            last_human = str(msg.content).lower()
+            break
+        elif isinstance(msg, HumanMessage):
+            last_human = str(msg.content).lower()
+            break
+
+    if not last_human:
+        return False
+
+    # Project creation triggers — any request to create/build a project
+    planning_triggers = [
+        "create project", "create a project", "create the project",
+        "full stack", "fullstack", "full-stack",
+        "frontend and backend", "backend and frontend",
+        "build a project", "build project",
+        "implement project", "implement a project",
+        "create application", "create an application",
+        "create app", "build app", "build an app",
+    ]
+
+    for trigger in planning_triggers:
+        if trigger in last_human:
+            return True
+
+    return False
+
+
+def task_planner_agent(state: State):
+    """
+    Task Planner: analyzes the user request and outputs a structured
+    section-based execution plan. Does NOT call tools — pure reasoning.
+    
+    The plan is stored in state['task_plan'] and consumed by the orchestrator.
+    """
+    from langchain_core.messages import SystemMessage, AIMessage
+    import json as _json
+
+    messages = state["messages"]
+    stack = detect_stack(messages)
+
+    # Build planner messages
+    planner_messages = [SystemMessage(content=PLANNER_SYSTEM_PROMPT)]
+
+    # Add context about detected stack and framework
+    if stack == "dotnet":
+        framework = detect_dotnet_framework(messages)
+        template_cmd = TEMPLATE_COPY_COMMANDS.get(framework, "DISCOVER_TEMPLATE")
+        planner_messages.append(SystemMessage(content=(
+            f"DETECTED STACK: dotnet\n"
+            f"DETECTED FRAMEWORK: {framework}\n"
+            f"TEMPLATE COPY COMMAND: {template_cmd}\n"
+        )))
+    elif stack == "angular":
+        template_cmd = TEMPLATE_COPY_COMMANDS.get("angular", "cp -r angularscaffolding .")
+        planner_messages.append(SystemMessage(content=(
+            f"DETECTED STACK: angular\n"
+            f"TEMPLATE COPY COMMAND: {template_cmd}\n"
+            f"COMPONENT GENERATION: npx ng g c <name>\n"
+            f"SERVICE GENERATION: npx ng g s services/<name>\n"
+            f"BUILD COMMAND: npx ng build\n"
+            f"NODE VERSION: 20 (do NOT change Angular version in package.json)\n"
+        )))
+    else:
+        planner_messages.append(SystemMessage(content=f"DETECTED STACK: {stack}\n"))
+
+    # Include user messages for context
+    planner_messages.extend(messages)
+
+    # Invoke planner LLM (same LLM, no tools)
+    response = llm_without_tools.invoke(planner_messages)
+    raw_plan = response.content.strip()
+
+    # Clean up JSON if wrapped in markdown
+    cleaned = raw_plan
+    if cleaned.startswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[1:])
+    if cleaned.endswith("```"):
+        cleaned = "\n".join(cleaned.split("\n")[:-1])
+    cleaned = cleaned.strip()
+
+    # Validate JSON
+    try:
+        plan_obj = _json.loads(cleaned)
+        plan_json = _json.dumps(plan_obj, indent=2)
+    except _json.JSONDecodeError:
+        # If planner didn't return valid JSON, wrap it
+        plan_json = _json.dumps({
+            "project_type": "single",
+            "stack": stack,
+            "dotnet_framework": None,
+            "sections": [{
+                "name": "Main",
+                "description": "Execute user request",
+                "template_command": None,
+                "working_directory": ".",
+                "steps": [{"step": 1, "action": "Execute as requested", "type": "code"}],
+                "carry_forward": []
+            }],
+            "final_report": True
+        }, indent=2)
+
+    # Log the plan
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(broadcast_log(f"📋 Task Plan created with {len(plan_obj.get('sections', []))} section(s)"))
+        else:
+            asyncio.run(broadcast_log(f"📋 Task Plan created with {len(plan_obj.get('sections', []))} section(s)"))
+    except Exception:
+        pass
+
+    # Return plan as AIMessage so orchestrator can see it, and store in state
+    # Initialize step tracking at section 0, step 0
+    plan_summary = f"[TASK PLAN]\n{plan_json}"
+    return {
+        "messages": [AIMessage(content=plan_summary)],
+        "task_plan": plan_json,
+        "current_section_idx": 0,
+        "current_step_idx": 0,
+    }
+
+
 # Global: tracks the detected .NET framework for this session so the
 # review system can also use it without re-scanning messages.
 _current_dotnet_framework: str = "webapi"
 
+def _build_step_context(task_plan: str, section_idx: int, step_idx: int) -> str:
+    """
+    Build focused execution context for the CURRENT step only.
+    Returns a prompt string telling the orchestrator exactly what to do NOW.
+    """
+    import json as _json
+    try:
+        plan = _json.loads(task_plan)
+    except _json.JSONDecodeError:
+        return ""
+
+    sections = plan.get("sections", [])
+    if section_idx >= len(sections):
+        # All sections done — generate final report
+        return """
+========================
+✅ ALL SECTIONS COMPLETE — GENERATE FINAL REPORT
+========================
+
+All planned sections have been executed. Output the final consolidated report:
+- List what was built per section
+- List files created
+- How to run the project
+- Status: complete
+"""
+
+    section = sections[section_idx]
+    steps = section.get("steps", [])
+    section_name = section.get("name", f"Section {section_idx + 1}")
+    section_desc = section.get("description", "")
+    total_sections = len(sections)
+    total_steps = len(steps)
+    carry_forward = section.get("carry_forward", [])
+
+    if step_idx >= total_steps:
+        # Current section done — this shouldn't happen (orchestrator advances),
+        # but handle gracefully
+        return f"""
+========================
+✅ SECTION "{section_name}" COMPLETE
+========================
+Moving to next section. Carry forward: {', '.join(carry_forward) if carry_forward else 'none'}
+"""
+
+    current_step = steps[step_idx]
+    step_num = current_step.get("step", step_idx + 1)
+    step_action = current_step.get("action", "")
+    step_type = current_step.get("type", "code")
+    step_command = current_step.get("command", "")
+    step_details = current_step.get("details", "")
+
+    # Build progress bar
+    completed_steps = step_idx
+    progress = f"[{completed_steps}/{total_steps} steps done]"
+
+    # Build previous steps summary (what's already done in this section)
+    done_summary = ""
+    if step_idx > 0:
+        done_items = []
+        for i in range(step_idx):
+            s = steps[i]
+            done_items.append(f"  ✅ Step {s.get('step', i+1)}: {s.get('action', '')}")
+        done_summary = "COMPLETED STEPS:\n" + "\n".join(done_items) + "\n\n"
+
+    # Build upcoming steps preview (next 2 only, for awareness)
+    upcoming = ""
+    remaining = steps[step_idx + 1:step_idx + 3]
+    if remaining:
+        upcoming_items = []
+        for s in remaining:
+            upcoming_items.append(f"  → Step {s.get('step', '?')}: {s.get('action', '')}")
+        upcoming = "\nUPCOMING (do NOT execute these yet):\n" + "\n".join(upcoming_items) + "\n"
+
+    # Build carry_forward from previous sections
+    prev_carry = ""
+    if section_idx > 0:
+        prev_sections = sections[:section_idx]
+        all_carry = []
+        for ps in prev_sections:
+            all_carry.extend(ps.get("carry_forward", []))
+        if all_carry:
+            prev_carry = "\nCONTEXT FROM PREVIOUS SECTIONS:\n" + "\n".join(f"  • {c}" for c in all_carry) + "\n"
+
+    # Build the focused prompt
+    ctx = f"""
+========================
+📋 ACTIVE TASK PLAN — STEP-BY-STEP EXECUTION
+========================
+
+SECTION: {section_name} ({section_idx + 1}/{total_sections})
+{section_desc}
+Progress: {progress}
+
+{done_summary}========================
+▶️ CURRENT STEP — DO THIS NOW (and ONLY this)
+========================
+
+Step {step_num}: {step_action}
+Type: {step_type}
+"""
+
+    if step_command:
+        ctx += f"Command: {step_command}\n"
+    if step_details:
+        ctx += f"Details: {step_details}\n"
+
+    ctx += f"""
+EXECUTION RULES FOR THIS STEP:
+1. Execute ONLY this one step. Do NOT jump ahead to future steps.
+2. For "execute" type → call execute_terminal with the command.
+3. For "code" type → write ALL files for this step using manage_file(action='write').
+4. For "review" type → call scalable_batch_review(mode='FAST').
+5. You may make MULTIPLE tool calls for this step (e.g., read files first, then write).
+6. When you have completed ALL tool calls for this step, output a SHORT completion
+   message (1 line, e.g., "✅ Step N done: <what was done>"). This signals the system
+   to advance to the next step.
+7. Do NOT list or plan future steps. Just execute THIS step.
+8. Do NOT ask the user questions.
+{upcoming}{prev_carry}
+⛔ STEP COMPLETION FLOW:
+   1. Make tool calls to execute this step (one or more calls as needed).
+   2. When all tool calls for this step are done, output a SHORT text summary.
+   3. The system will then automatically advance to the next step.
+   Do NOT output a long summary. Just: "✅ Step N done: <brief>".
+"""
+    return ctx
+
+
 def orchestrator_agent(state: State):
     """Orchestrator: understands intent, plans, and invokes tools.
     
-    1. ALWAYS prepends SYSTEM_PROMPT (universal rules)
-    2. Detects stack from user message (dotnet, node, python, react, java)
-    3. For .NET: also detects sub-framework (webapi, console, mvc)
-    4. Injects ONLY the relevant project rules + test rules
-    5. Invokes LLM with the enhanced message list
+    When a task_plan exists (set by planner), the orchestrator:
+    1. Reads current_section_idx and current_step_idx (set by plan_continue)
+    2. Skips checkpoint steps automatically
+    3. Injects ONLY the current step's context (not the full plan)
+    4. Invokes LLM with focused, single-step instructions
     
-    Message order: [SYSTEM_PROMPT] → [PROJECT_RULES] → [TEST_RULES] → [user messages...]
+    Step advancement is handled ONLY by plan_continue_node — NOT here.
+    This prevents premature advancement when the agent makes multiple
+    tool calls (discovery + actual work) within a single step.
+    
+    When no plan exists, it behaves as the normal orchestrator.
     """
     global _current_dotnet_framework
     from langchain_core.messages import SystemMessage
+    import json as _json
+
     messages = state["messages"]
+    task_plan = state.get("task_plan", "")
+    section_idx = state.get("current_section_idx", 0)
+    step_idx = state.get("current_step_idx", 0)
+
+    # NO auto-advance here. Step advancement is handled exclusively
+    # by plan_continue_node when the agent outputs text without tools.
+    state_update = {}
     
     # Detect stack from user messages
     stack = detect_stack(messages)
@@ -3994,23 +4559,171 @@ def orchestrator_agent(state: State):
         if stack_test_rules:
             enhanced_messages.append(SystemMessage(content=stack_test_rules))
     
+    # If a task plan exists, inject ONLY the current step context
+    # Auto-skip checkpoint steps (advance in state_update so agent sees next real step)
+    if task_plan:
+        try:
+            _plan = _json.loads(task_plan)
+            _sections = _plan.get("sections", [])
+            # Skip checkpoint/status steps that have no real work
+            while section_idx < len(_sections):
+                _sec = _sections[section_idx]
+                _steps = _sec.get("steps", [])
+                if step_idx < len(_steps):
+                    _cur = _steps[step_idx]
+                    _action = _cur.get("action", "").lower()
+                    _type = _cur.get("type", "").lower()
+                    is_checkpoint = (
+                        _type == "checkpoint" or
+                        "checkpoint" in _action or
+                        "section complete" in _action
+                    ) and not _cur.get("command")
+                    if is_checkpoint:
+                        step_idx += 1
+                        if step_idx >= len(_steps):
+                            section_idx += 1
+                            step_idx = 0
+                        state_update["current_section_idx"] = section_idx
+                        state_update["current_step_idx"] = step_idx
+                        continue
+                break
+        except _json.JSONDecodeError:
+            pass
+
+        step_context = _build_step_context(task_plan, section_idx, step_idx)
+        if step_context:
+            enhanced_messages.append(SystemMessage(content=step_context))
+    
     # Append all conversation messages
     enhanced_messages.extend(messages)
     
-    return {"messages": [llm.invoke(enhanced_messages)]}
+    result = {"messages": [llm.invoke(enhanced_messages)]}
+    result.update(state_update)
+    return result
 
 
-# 2) Planner Agent – the planning/reasoning is embedded in the orchestrator's
-#    SYSTEM_PROMPT (THINK→PLAN→EXECUTE→REPORT). No separate node needed;
-#    the orchestrator produces the 🎯/🤔/📋 reasoning text as part of its response.
+def _plan_has_remaining_steps(state: State) -> bool:
+    """Check if the active plan still has steps to execute."""
+    import json as _json
+    task_plan = state.get("task_plan", "")
+    if not task_plan:
+        return False
+    try:
+        plan = _json.loads(task_plan)
+        sections = plan.get("sections", [])
+        section_idx = state.get("current_section_idx", 0)
+        step_idx = state.get("current_step_idx", 0)
+        if section_idx >= len(sections):
+            return False
+        current_section = sections[section_idx]
+        total_steps = len(current_section.get("steps", []))
+        # Still has steps in current section, or has more sections
+        if step_idx < total_steps:
+            return True
+        if section_idx + 1 < len(sections):
+            return True
+        return False
+    except _json.JSONDecodeError:
+        return False
+
+
+def plan_continue_node(state: State):
+    """
+    Step advancement node: fires when the orchestrator outputs text without
+    tool calls (meaning the current step is complete). This node:
+    1. Advances current_step_idx (and current_section_idx if section done)
+    2. Skips checkpoint steps
+    3. Injects a nudge message to continue
+    4. Loops back to the orchestrator for the next step
+    
+    This is the ONLY place where step advancement happens.
+    """
+    from langchain_core.messages import SystemMessage
+    import json as _json
+
+    task_plan = state.get("task_plan", "")
+    section_idx = state.get("current_section_idx", 0)
+    step_idx = state.get("current_step_idx", 0)
+
+    state_update = {}
+
+    if task_plan:
+        try:
+            plan = _json.loads(task_plan)
+            sections = plan.get("sections", [])
+
+            if section_idx < len(sections):
+                current_section = sections[section_idx]
+                total_steps = len(current_section.get("steps", []))
+
+                # Advance to next step
+                new_step = step_idx + 1
+                new_section = section_idx
+
+                if new_step >= total_steps:
+                    # Section complete — move to next section
+                    new_section = section_idx + 1
+                    new_step = 0
+
+                # Skip checkpoint steps in the new position
+                while new_section < len(sections):
+                    sec = sections[new_section]
+                    steps = sec.get("steps", [])
+                    if new_step < len(steps):
+                        cur = steps[new_step]
+                        _action = cur.get("action", "").lower()
+                        _type = cur.get("type", "").lower()
+                        is_checkpoint = (
+                            _type == "checkpoint" or
+                            "checkpoint" in _action or
+                            "section complete" in _action
+                        ) and not cur.get("command")
+                        if is_checkpoint:
+                            new_step += 1
+                            if new_step >= len(steps):
+                                new_section += 1
+                                new_step = 0
+                            continue
+                    break
+
+                state_update["current_section_idx"] = new_section
+                state_update["current_step_idx"] = new_step
+
+                # Build progress message
+                if new_section < len(sections):
+                    next_sec = sections[new_section]
+                    next_steps = next_sec.get("steps", [])
+                    if new_step < len(next_steps):
+                        next_step_info = next_steps[new_step]
+                        nudge = (
+                            f"⚡ Step completed. Moving to: "
+                            f"Section '{next_sec.get('name', '')}' → "
+                            f"Step {next_step_info.get('step', new_step+1)}: "
+                            f"{next_step_info.get('action', '')}. "
+                            f"Execute this step NOW — make a tool call."
+                        )
+                    else:
+                        nudge = "⚡ Section completed. Moving to next section."
+                else:
+                    nudge = "✅ All sections complete. Generate the final report."
+            else:
+                nudge = "✅ All sections complete. Generate the final report."
+        except _json.JSONDecodeError:
+            nudge = "⚡ Continue with the next action."
+    else:
+        nudge = "⚡ Continue with the next action."
+
+    result = {"messages": [SystemMessage(content=nudge)]}
+    result.update(state_update)
+    return result
 
 
 def route_tools_or_end(state: State):
     """
     Router: examines the orchestrator's last message.
-    - If no tool calls → END
-    - If tool calls all target the same agent → route to that specialized node
-    - If tool calls target multiple agents → route to fallback 'action' node
+    - If tool calls → route to the appropriate specialized node
+    - If no tool calls AND plan has remaining steps → route to plan_continue (loop back)
+    - If no tool calls AND no plan / plan done → END
     
     This preserves the server.py streaming contract:
     - Orchestrator outputs under key 'agent'
@@ -4018,8 +4731,11 @@ def route_tools_or_end(state: State):
     """
     last_message = state["messages"][-1]
     
-    # No tool calls → end
+    # No tool calls
     if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
+        # If plan is active with remaining steps → loop back via plan_continue
+        if _plan_has_remaining_steps(state):
+            return "plan_continue"
         return END
     
     # Determine which specialized agent(s) the tool calls target
@@ -4041,8 +4757,27 @@ def route_tools_or_end(state: State):
 # -------------------------------------------------
 workflow = StateGraph(State)
 
+
+# --- Entry Router ---
+# Decides whether the user's request should go to the planner first or
+# directly to the orchestrator.
+def route_start(state: State):
+    """
+    START router:
+    - Complex tasks (full project, create project, full-stack) → planner first
+    - Simple tasks (questions, single file edits) → orchestrator directly
+    """
+    messages = state.get("messages", [])
+    if _needs_planning(messages):
+        return "planner"
+    return "agent"
+
+
 # --- Agent Nodes ---
-# Orchestrator (named "agent" to preserve server.py streaming key)
+# 0) Task Planner — creates structured plan, no tools
+workflow.add_node("planner", task_planner_agent)
+
+# 1) Orchestrator (named "agent" to preserve server.py streaming key)
 workflow.add_node("agent", orchestrator_agent)
 
 # --- Specialized Tool Agent Nodes ---
@@ -4064,11 +4799,24 @@ workflow.add_node("review_action", review_tool_node)
 # Fallback: combined tool node for mixed multi-tool calls
 workflow.add_node("action", all_tool_node)
 
-# --- Edges ---
-# START → Orchestrator
-workflow.add_edge(START, "agent")
+# 10) Plan Continue — passthrough node that loops back to orchestrator
+#     when the LLM outputs text without tool calls but the plan still has steps
+workflow.add_node("plan_continue", plan_continue_node)
 
-# Orchestrator → Router (dispatches to specialized agent or END)
+# --- Edges ---
+# START → conditional: planner or agent
+workflow.add_conditional_edges(START, route_start, {
+    "planner": "planner",
+    "agent": "agent",
+})
+
+# Planner → Orchestrator (planner output feeds into orchestrator as context)
+workflow.add_edge("planner", "agent")
+
+# Plan Continue → back to Orchestrator (loop to pick up next step)
+workflow.add_edge("plan_continue", "agent")
+
+# Orchestrator → Router (dispatches to specialized agent, plan_continue, or END)
 ALL_TOOL_ROUTES = {
     "workspace_action": "workspace_action",
     "file_action": "file_action",
@@ -4078,12 +4826,12 @@ ALL_TOOL_ROUTES = {
     "documentation_action": "documentation_action",
     "review_action": "review_action",
     "action": "action",  # fallback for mixed tool calls
+    "plan_continue": "plan_continue",  # loop back when plan has remaining steps
     END: END,
 }
 workflow.add_conditional_edges("agent", route_tools_or_end, ALL_TOOL_ROUTES)
 
 # All specialized tool nodes → back to Orchestrator
-# file_action goes straight back to agent — review is done as explicit batch step
 for agent_node in ["workspace_action", "file_action", "execution_action",
                    "template_action", "test_action", "documentation_action",
                    "review_action", "action"]:
@@ -4113,7 +4861,10 @@ if __name__ == "__main__":
                     "add a python file 'app.py' inside it that write a code for printing prime no., and then run it."
                 )
             )
-        ]
+        ],
+        "task_plan": "",
+        "current_section_idx": 0,
+        "current_step_idx": 0,
     }
 
     for output in app.stream(test_input):

@@ -256,7 +256,7 @@ async def chat(request: ChatRequest):
     await update_progress_task(analyze_task, "completed", "Request analyzed")
     
     # Create inputs with full conversation history and recursion limit
-    inputs = {"messages": session["messages"].copy()}
+    inputs = {"messages": session["messages"].copy(), "task_plan": "", "current_section_idx": 0, "current_step_idx": 0}
     config = {"recursion_limit": 150}  # Allow longer agent→tool→agent chains before stopping
     final_response = ""
     
@@ -267,17 +267,32 @@ async def chat(request: ChatRequest):
     async for output in agent_app.astream(inputs, config=config):
         for key, value in output.items():
 
+            # Stream planner output (task plan)
+            if key == "planner":
+                plan_msg = value.get("messages", [{}])
+                if plan_msg:
+                    plan_content = plan_msg[-1].content if hasattr(plan_msg[-1], 'content') else str(plan_msg[-1])
+                    await broadcast_log(f"📋 Task Planner: Plan created: {plan_content}")
+                    await update_progress_task(current_task_id, "completed", "Task plan created")
+                    current_task_id = await add_progress_task("Executing plan", "Following task plan...")
+
             # Stream agent messages
             if key == "agent":
                 msg = value["messages"][-1].content
-                await broadcast_log(f"🤖 Agent: {msg}")
+                # Track step progress from state updates
+                sec_idx = value.get("current_section_idx")
+                stp_idx = value.get("current_step_idx")
+                step_info = ""
+                if sec_idx is not None and stp_idx is not None:
+                    step_info = f" [Section {sec_idx + 1}, Step {stp_idx + 1}]"
+                await broadcast_log(f"🤖 Agent{step_info}: {msg}")
                 final_response = msg
                 
                 # Update progress based on message content
                 if "thinking" in msg.lower() or "planning" in msg.lower():
-                    await update_progress_task(current_task_id, "in_progress", "Planning approach...")
+                    await update_progress_task(current_task_id, "in_progress", f"Planning approach...{step_info}")
                 elif "reading" in msg.lower() or "analyzing" in msg.lower():
-                    await update_progress_task(current_task_id, "in_progress", "Analyzing files...")
+                    await update_progress_task(current_task_id, "in_progress", f"Analyzing files...{step_info}")
                 elif "should i proceed" in msg.lower() or "(yes/no)" in msg.lower():
                     await update_progress_task(current_task_id, "completed", "Waiting for confirmation")
                     current_task_id = await add_progress_task("Awaiting confirmation", "Please confirm the action")
