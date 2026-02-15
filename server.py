@@ -256,7 +256,16 @@ async def chat(request: ChatRequest):
     await update_progress_task(analyze_task, "completed", "Request analyzed")
     
     # Create inputs with full conversation history and recursion limit
-    inputs = {"messages": session["messages"].copy(), "task_plan": "", "current_section_idx": 0, "current_step_idx": 0}
+    inputs = {
+        "messages": session["messages"].copy(),
+        "task_plan": "",
+        "current_phase_idx": 0,
+        "current_step_idx": 0,
+        "phase_status": "pending",
+        "phase_files": "[]",
+        "retry_count": 0,
+        "workspace_structure": "",
+    }
     config = {"recursion_limit": 150}  # Allow longer agent→tool→agent chains before stopping
     final_response = ""
     
@@ -279,12 +288,15 @@ async def chat(request: ChatRequest):
             # Stream agent messages
             if key == "agent":
                 msg = value["messages"][-1].content
-                # Track step progress from state updates
-                sec_idx = value.get("current_section_idx")
+                # Track phase/step progress from state updates
+                phase_idx = value.get("current_phase_idx")
                 stp_idx = value.get("current_step_idx")
+                phase_sts = value.get("phase_status", "")
                 step_info = ""
-                if sec_idx is not None and stp_idx is not None:
-                    step_info = f" [Section {sec_idx + 1}, Step {stp_idx + 1}]"
+                if phase_idx is not None and stp_idx is not None:
+                    step_info = f" [Phase {phase_idx + 1}, Step {stp_idx + 1}]"
+                    if phase_sts:
+                        step_info += f" ({phase_sts})"
                 await broadcast_log(f"🤖 Agent{step_info}: {msg}")
                 final_response = msg
                 
@@ -328,6 +340,36 @@ async def chat(request: ChatRequest):
                 # Process any queued file changes (both pending and applied)
                 await process_file_change_queue()
                 await process_applied_change_queue()
+
+            # Stream phase orchestration events
+            if key == "phase_advance":
+                msgs = value.get("messages", [])
+                if msgs and hasattr(msgs[-1], 'content'):
+                    phase_msg = msgs[-1].content
+                    p_idx = value.get("current_phase_idx")
+                    s_idx = value.get("current_step_idx")
+                    p_info = f" [Phase {p_idx + 1}, Step {s_idx + 1}]" if p_idx is not None and s_idx is not None else ""
+                    await broadcast_log(f"⚡ Phase Advance{p_info}: {phase_msg}")
+
+            if key == "phase_review_build":
+                msgs = value.get("messages", [])
+                if msgs and hasattr(msgs[-1], 'content'):
+                    rb_msg = msgs[-1].content
+                    p_sts = value.get("phase_status", "")
+                    await broadcast_log(f"🔧 Phase Review/Build ({p_sts}): {rb_msg[:200]}")
+                    if "failed" in p_sts.lower():
+                        await update_progress_task(current_task_id, "in_progress", "Build failed — fixing...")
+                    elif "completed" in p_sts.lower():
+                        await update_progress_task(current_task_id, "completed", "Phase complete")
+                        current_task_id = await add_progress_task("Next phase", "Starting next phase...")
+
+            if key == "integration_validator":
+                msgs = value.get("messages", [])
+                if msgs and hasattr(msgs[-1], 'content'):
+                    val_msg = msgs[-1].content
+                    await broadcast_log(f"🔍 Integration Validation: {val_msg[:300]}")
+                    await update_progress_task(current_task_id, "completed", "Integration validated")
+                    current_task_id = await add_progress_task("Final report", "Generating final report...")
 
     # Mark final task as complete
     await update_progress_task(current_task_id, "completed", "Done")

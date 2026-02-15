@@ -74,9 +74,28 @@ async def execute_terminal(command: str):
     
     # Get workspace path from VS Code
     workspace_path = get_workspace_path()
-    # workspace_path = "/home/code/workspace"  # Forcing to default workspace for now
 
-    
+    # ── NPM INSTALL OPTIMIZATION ──
+    # Skip npm install if node_modules already exists in the target directory
+    stripped_cmd = command.strip()
+    if "npm install" in stripped_cmd or "npm i" in stripped_cmd:
+        # Extract the working directory from `cd <dir> && npm install` pattern
+        npm_dir = workspace_path
+        if "&&" in stripped_cmd:
+            parts = stripped_cmd.split("&&")
+            for part in parts:
+                part = part.strip()
+                if part.startswith("cd "):
+                    cd_target = part[3:].strip()
+                    if os.path.isabs(cd_target):
+                        npm_dir = cd_target
+                    else:
+                        npm_dir = os.path.join(workspace_path, cd_target)
+        node_modules_path = os.path.join(npm_dir, "node_modules")
+        if os.path.isdir(node_modules_path):
+            await broadcast_log(f"⏭️ npm install SKIPPED — node_modules already exists in {npm_dir}")
+            return f"✅ npm install skipped (node_modules already exists in {npm_dir})"
+
     await broadcast_log(f"▶️ Executing: {command}")
     await broadcast_log(f"📂 In directory: {workspace_path}")
     await broadcast_log(f"🆔 Process ID: {process_id}")
@@ -371,6 +390,9 @@ def list_dir(path: str = "."):
     Lists files and subdirectories in the given directory. Use this to discover
     template folders in the workspace (e.g. ado, nunit) and their structure.
     
+    Results are cached in memory so repeated calls to the same directory are instant
+    (cache is invalidated when files are written to that directory).
+    
     Args:
         path: Directory path relative to workspace or absolute (default: workspace root)
     """
@@ -381,6 +403,12 @@ def list_dir(path: str = "."):
         return f"❌ Directory does not exist: {path}"
     if not os.path.isdir(path):
         return f"❌ Not a directory: {path}"
+
+    # Check cache first (avoids redundant filesystem reads)
+    if path in _workspace_structure_cache:
+        cached = _workspace_structure_cache[path]
+        return "Contents of " + path + " (cached):\n" + "\n".join(cached) if cached else " (empty)"
+
     try:
         entries = sorted(os.listdir(path))
         lines = []
@@ -388,6 +416,8 @@ def list_dir(path: str = "."):
             full = os.path.join(path, name)
             suffix = "/" if os.path.isdir(full) else ""
             lines.append(name + suffix)
+        # Cache the result
+        _workspace_structure_cache[path] = lines
         return "Contents of " + path + ":\n" + "\n".join(lines) if lines else " (empty)"
     except Exception as e:
         return f"❌ Error listing directory: {str(e)}"
@@ -598,6 +628,9 @@ import json as _json
 _modified_files: set = set()      # absolute paths of files written since last review
 _review_cache: dict = {}          # path → sha256 hex of last-reviewed content
 REVIEW_MODE = "FAST"              # "FAST" (default) or "STRICT"
+_phase_created_files: set = set()  # files created/modified in the CURRENT phase (reset per phase)
+_workspace_structure_cache: dict = {}  # dir_path → list of entries (avoids repeated list_dir calls)
+MAX_PHASE_RETRIES = 3             # max retry attempts per phase for build failures
 
 # Files that should never be reviewed (configs, non-code)
 _SKIP_EXTENSIONS = {
@@ -629,6 +662,10 @@ def _track_modified_file(abs_path: str, content: str):
     Does NOT update _review_cache — that happens AFTER the review completes,
     so newly created/updated files are never skipped as 'unchanged'."""
     _modified_files.add(abs_path)
+    _phase_created_files.add(abs_path)
+    # Invalidate workspace structure cache for this file's directory
+    parent_dir = os.path.dirname(abs_path)
+    _workspace_structure_cache.pop(parent_dir, None)
 
 
 def _classify_layer(abs_path: str) -> str:
@@ -1175,13 +1212,21 @@ TOOL_TO_AGENT = {
 # -------------------------------------------------
 class State(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
-    # Task plan: set by planner_agent, consumed by orchestrator.
-    # Empty string when no plan is active.
+    # ── Phase-based Task Plan ──
+    # JSON string set by planner_node; empty when no plan is active.
     task_plan: str  # JSON string or ""
-    # Step tracking: which section and step the orchestrator is currently on.
-    # Set by planner, advanced by orchestrator after each step completes.
-    current_section_idx: int  # 0-based index into sections[]
-    current_step_idx: int     # 0-based index into current section's steps[]
+    # Phase tracking: which phase and step the executor is currently on.
+    current_phase_idx: int    # 0-based index into phases[]
+    current_step_idx: int     # 0-based index into current phase's steps[]
+    phase_status: str         # "pending" | "running" | "completed" | "failed"
+    # Files created/modified in the CURRENT phase (reset per phase).
+    # Used for per-phase batch review so only relevant files are reviewed.
+    phase_files: str          # JSON-serialized list of absolute paths (or "[]")
+    # Retry counter for build/command failures within a phase.
+    retry_count: int          # incremented on failure, reset per phase
+    # Workspace folder structure cache (avoids repeated list_dir calls).
+    # JSON dict mapping dir path → list of entries.  Empty string = not cached.
+    workspace_structure: str  # JSON string or ""
 
 
 # -------------------------------------------------
@@ -2210,40 +2255,40 @@ Weightage distribution guidelines:
 • ALL weightages MUST sum to exactly 1.0
 
 ====================
-📋 TASK PLANNER — STEP-BY-STEP EXECUTION
+📋 PHASE-BASED TASK EXECUTION
 ====================
 
-When a Task Plan is active, the system feeds you ONE STEP AT A TIME.
+When a Task Plan is active, the system uses MULTI-PHASE execution.
 
 HOW IT WORKS:
-• You receive a "CURRENT STEP" instruction telling you exactly what to do NOW.
-• Execute ONLY that one step — make ALL the tool calls needed for it.
+• The plan is divided into PHASES (e.g., template_setup, backend, frontend, validation).
+• Within each phase, you receive ONE STEP AT A TIME.
+• Execute ONLY the current step — make ALL the tool calls needed for it.
 • You may make MULTIPLE tool calls within one step (e.g., read a file, then write it).
-• When you have finished ALL tool calls for the step, output a SHORT completion message:
-  "✅ Step N done: <brief summary>"
-• This text-only output signals the system to advance to the next step.
-• You will then receive the NEXT step's instruction automatically.
-• This continues until all sections and steps are complete.
+• When done with a step, output SHORT: "✅ Step N done: <brief>"
+• The system auto-advances to the next step.
+• When all steps in a phase complete, the system AUTOMATICALLY runs:
+  - Batch review (if phase.review=true) — only for files created in that phase
+  - Build verification (if phase.build=true) — using the phase's build_commands
+  - If build fails → you'll be asked to fix it (max 3 retries per phase)
+• After all phases pass → integration validation runs → final report.
 
 YOUR RULES:
 1. Execute ONLY the current step shown in the "CURRENT STEP" instruction.
 2. Do NOT plan ahead or list future steps. The system handles sequencing.
 3. Do NOT skip steps or combine multiple steps into one turn.
-4. For "execute" type → call execute_terminal with the command.
-5. For "code" type → write the files as described using manage_file(action='write').
-6. For "review" type → call scalable_batch_review(mode='FAST').
-7. For "description" type → generate project description.
-8. Do NOT ask the user questions. The plan is self-contained.
-9. Use "CONTEXT FROM PREVIOUS SECTIONS" when available (carry_forward data).
-10. When done with the step's tool calls, output ONLY a short "✅ Step N done: ..." message.
-    Do NOT output long summaries or next-step plans. Just the completion line.
+4. For "execute"/"generate" type → call execute_terminal with the command.
+5. For "code" type → write files using manage_file(action='write').
+6. Do NOT call scalable_batch_review or build commands yourself — the system handles those per phase.
+7. Do NOT ask the user questions. The plan is self-contained.
+8. When done, output SHORT: "✅ Step N done: <brief>". No long summaries.
 
-MULTI-SECTION PROJECTS (e.g., full-stack: backend + frontend):
-• For fullstack .NET + Angular: use a SINGLE section — copy ONE template
-  (cp -r dotnettemplates/dotnetangularfullstack .) and work on both dotnetapp/ and angularapp/
-  simultaneously with interleaved steps. Do NOT change ports (backend: 8080, frontend: 8081).
-• For other full-stack combos: Section 1 (Backend) runs first, then Section 2 (Frontend).
-• Context carries forward automatically between sections.
+FULLSTACK .NET + ANGULAR:
+• Template: cp -r dotnettemplates/dotnetangularfullstack .
+  (contains BOTH dotnetapp/ and angularapp/ — ONE copy)
+• Phases: setup → backend → frontend → validation
+• Ports: backend=8080, frontend=8081 (DO NOT CHANGE)
+• Review + build run automatically per phase
 
 ⚠️ TEST CASES ARE NOT INCLUDED BY DEFAULT:
 • The plan does NOT include tests unless the user explicitly asked.
@@ -4153,22 +4198,38 @@ TEMPLATE_COPY_COMMANDS = {
 
 PLANNER_SYSTEM_PROMPT = """You are a Task Planner Agent for an autonomous IDE backend.
 
-Your ONLY job is to analyze the user's request and produce a structured execution plan.
+Your ONLY job is to analyze the user's request and produce a STRUCTURED MULTI-PHASE execution plan.
 You do NOT execute anything. You do NOT call tools. You ONLY output a plan.
+
+========================
+PHASE-BASED PLANNING MODEL
+========================
+
+Instead of flat steps, you produce PHASES. Each phase:
+  - Groups logically related steps (e.g., all backend code, all frontend code)
+  - Has its own review flag (review=true means batch-review only files from THIS phase)
+  - Has its own build flag (build=true means run build commands after all steps complete)
+  - Must fully complete before the next phase starts
+  - If build fails → auto-fix and retry (max 3 attempts) before proceeding
+
+The executor handles review/build automatically based on flags — do NOT add explicit
+"Batch review" or "Build" steps in the steps array. Just set the flags.
 
 ========================
 PLANNING RULES
 ========================
 
-1. Break the user request into SECTIONS.
-   - Each section is an independently completable unit of work.
-   - For a backend-only or frontend-only project: just one section.
-   - For FULLSTACK .NET + ANGULAR: use ONE section (the template has both dotnetapp/ and angularapp/).
-   - For other full-stack combos (e.g., dotnet + plain HTML): Section 1 = Backend, Section 2 = Frontend.
+1. Break the user request into PHASES (not sections).
+   - Phase 1: template_setup — copy template, install deps, generate scaffolding
+   - Phase 2: backend_implementation — models, services, controllers (code only)
+   - Phase 3: frontend_implementation — components, services, routing, CSS (code only)
+   - Phase 4: integration_validation — final verification (builds, ports, endpoints)
+   For backend-only: phases 1 (setup), 2 (backend), 4 (validation). Skip phase 3.
+   For frontend-only: phases 1 (setup), 3 (frontend), 4 (validation). Skip phase 2.
 
-2. Within each section, define STEPS in execution order.
-   - Each step is a concrete action the orchestrator should perform.
-   - Steps must be specific (not vague like "implement backend").
+2. Steps within a phase are ONLY implementation actions — no review or build steps.
+   - The system automatically runs review + build based on the phase flags.
+   - Step types: "execute" (run command), "code" (write files), "generate" (ng g c/s).
 
 3. For KNOWN TEMPLATES, specify the EXACT copy command — do NOT search:
    - .NET Web API: cp -r dotnettemplates/dotnetwebapi .
@@ -4176,113 +4237,80 @@ PLANNING RULES
    - .NET MVC: cp -r dotnettemplates/dotnetmvc .
    - Angular: cp -r angularscaffolding .
    - fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
-     (this contains BOTH dotnetapp/ and angularapp/ — ONE copy for the entire project)
+     (contains BOTH dotnetapp/ and angularapp/ — ONE copy for the entire project)
    - For unknown stacks: specify "DISCOVER_TEMPLATE" and the orchestrator will search.
 
-4. Each section MUST follow this flow:
-   - Copy template (if applicable)
-   - Implement solution code
-   - Batch review
-   - Build verification
-   - Section complete checkpoint
+4. DO NOT include test cases in the plan UNLESS the user explicitly asked.
 
-5. DO NOT include test cases or test execution in the plan UNLESS the user explicitly asked for tests.
-   - Default plan = solution code only (no tests, no description).
-   - If user says "with tests" or "add test cases" → include test steps.
-   - If user says "with description" → include description step.
-   - Otherwise, OMIT them entirely.
+5. The plan must be SELF-CONTAINED — no user input needed mid-execution.
 
-6. The plan must be SELF-CONTAINED — the orchestrator should follow it without asking questions.
+6. PORT CONFIGURATION — NEVER CHANGE PORTS:
+   - fullstack .NET + Angular: backend=8080, frontend=8081 (pre-configured).
+   - Do NOT add steps to modify launchSettings.json, proxy.conf.json, angular.json ports.
 
-7. Do NOT plan tasks that require user input mid-execution.
+7. NPM INSTALL OPTIMIZATION:
+   - When installing npm dependencies, the executor checks if node_modules/ exists first.
+   - Still include the install step — the executor will skip it if already installed.
 
-8. PORT CONFIGURATION — NEVER CHANGE PORTS:
-   - The fullstack .NET + Angular template has pre-configured ports: backend=8080, frontend=8081.
-   - Do NOT add any steps to modify launchSettings.json, proxy config, or port numbers.
-   - Do NOT change angular.json serve port, proxy.conf.json, or any port-related config.
-   - The template is already wired for backend↔frontend communication.
+8. Each phase specifies a build_command (or list) that the executor runs when build=true.
+   - Backend .NET: "cd <root>/dotnetapp && dotnet build"
+   - Frontend Angular: "cd <root>/angularapp && npx ng build"
+   - The executor handles build failures with auto-fix + retry (up to 3 times).
 
 ========================
-CONTEXT RETENTION RULES
-========================
-
-- Information discovered in Section 1 (e.g., project structure, DB schema, API endpoints) MUST be
-  reused in Section 2+ — do NOT re-discover.
-- State "CARRY FORWARD:" at the end of each section with what the next section needs.
-
-========================
-FULLSTACK .NET + ANGULAR PROJECT PLANNING (SINGLE SECTION)
+FULLSTACK .NET + ANGULAR
 ========================
 
 When the user asks for a full-stack project with .NET backend AND Angular frontend:
 
-Use a SINGLE SECTION — the template "dotnetangularfullstack" contains BOTH:
-  - dotnetangularfullstack/dotnetapp/ → backend (.NET Web API)
-  - dotnetangularfullstack/angularapp/ → frontend (Angular)
+Template: cp -r dotnettemplates/dotnetangularfullstack .
+Structure: dotnetangularfullstack/dotnetapp/ (backend) + dotnetangularfullstack/angularapp/ (frontend)
+Ports: backend=8080, frontend=8081 (DO NOT CHANGE)
 
-SECTION 1 — FULL-STACK (backend + frontend interleaved):
-  1. Copy template: cp -r dotnettemplates/dotnetangularfullstack .
-  2. Install Angular deps: cd dotnetangularfullstack/angularapp && npm install
-  3. Generate Angular components: cd dotnetangularfullstack/angularapp && npx ng g c <name>
-  4. Generate Angular services: cd dotnetangularfullstack/angularapp && npx ng g s services/<name>
-  5. Implement backend models (dotnetangularfullstack/dotnetapp/Models/)
-  6. Implement backend controllers (dotnetangularfullstack/dotnetapp/Controllers/)
-  7. Implement Angular service code (HttpClient calls to backend API)
-  8. Implement Angular component .ts/.html/.css files
-  9. Add attractive CSS (global styles + component styles)
-  10. Batch review: scalable_batch_review(mode='FAST')
-  11. Build backend: cd dotnetangularfullstack/dotnetapp && dotnet build
-  12. Build frontend: cd dotnetangularfullstack/angularapp && npx ng build
+Phase 1 — template_setup (review=false, build=false):
+  - Copy template
+  - Install Angular deps (npm install — executor skips if node_modules exists)
+  - Generate Angular components: npx ng g c components/<name>
+  - Generate Angular services: npx ng g s services/<name>
 
-KEY RULES FOR FULLSTACK .NET + ANGULAR:
-- ONE template copy, ONE section, interleaved steps — do NOT split into 2 sections.
-- Do NOT change any ports — backend: 8080, frontend: 8081 (pre-configured in template).
-- Do NOT modify launchSettings.json, proxy.conf.json, or angular.json port settings.
-- Angular components/services MUST be generated with npx ng g c / npx ng g s.
-- Attractive CSS is MANDATORY for Angular components.
-- The working_directory for backend code is "dotnetangularfullstack/dotnetapp".
-- The working_directory for frontend code is "dotnetangularfullstack/angularapp".
+Phase 2 — backend_implementation (review=true, build=true):
+  - Implement models (dotnetangularfullstack/dotnetapp/Models/)
+  - Implement controllers (dotnetangularfullstack/dotnetapp/Controllers/)
+  - Configure CORS/DI if needed in Program.cs (but do NOT change ports)
+  build_commands: ["cd dotnetangularfullstack/dotnetapp && dotnet build"]
 
-========================
-OTHER FULL-STACK COMBOS (e.g., dotnet + plain HTML)
-========================
+Phase 3 — frontend_implementation (review=true, build=true):
+  - Implement Angular service code (HttpClient calls to backend API at localhost:8080)
+  - Implement component .ts/.html/.css files
+  - Setup routing and module imports (HttpClientModule, FormsModule)
+  - Add attractive CSS (global + component styles — MANDATORY)
+  build_commands: ["cd dotnetangularfullstack/angularapp && npx ng build"]
 
-When the user asks for a full-stack project that is NOT .NET + Angular:
-
-SECTION 1 — BACKEND:
-  1. Copy known template (e.g., cp -r dotnettemplates/dotnetwebapi .)
-  2. Implement all models, services, controllers
-  3. Batch review
-  4. Build and verify
-  → carry_forward: API endpoints, DB schema, project structure, port
-
-SECTION 2 — FRONTEND:
-  1. Create HTML/CSS/JS files or copy template
-  2. Implement frontend code
-  3. Batch review
-  → Section complete
+Phase 4 — integration_validation (review=false, build=true):
+  - Verify backend builds
+  - Verify frontend builds
+  build_commands: ["cd dotnetangularfullstack/dotnetapp && dotnet build", "cd dotnetangularfullstack/angularapp && npx ng build"]
 
 ========================
-ANGULAR-ONLY PROJECT PLANNING
+ANGULAR-ONLY PROJECT
 ========================
 
-When the user asks for an Angular project (frontend only):
+Phase 1 — template_setup: copy template, npm install, generate components/services
+Phase 2 — frontend_implementation: write service/component code, routing, CSS
+Phase 3 — integration_validation: build
 
-SECTION 1 — ANGULAR:
-  1. Copy template: cp -r angularscaffolding .
-  2. cd angularscaffolding && npm install
-  3. Generate components: npx ng g c <component-name> (one step per component)
-  4. Generate services: npx ng g s services/<service-name> (one step per service)
-  5. Write solution code into generated .ts/.html/.css files
-  6. Write test cases into generated .spec.ts files
-  7. Batch review
-  8. Build: npx ng build
+Angular rules:
+- Components/services MUST be generated with npx ng g c / npx ng g s.
+- (as any) casting MANDATORY in test files (if tests requested).
+- Attractive CSS MANDATORY.
 
-IMPORTANT for Angular steps:
-- Components and services MUST be generated with npx ng g c / npx ng g s — never manually create files.
-- Test cases are written IN THE SAME PHASE as solution code (in .spec.ts files).
-- (as any) casting is MANDATORY in all test files.
-- Service test cases are MANDATORY.
+========================
+BACKEND-ONLY PROJECT (.NET)
+========================
+
+Phase 1 — template_setup: copy template
+Phase 2 — backend_implementation: models, services, controllers
+Phase 3 — integration_validation: build
 
 ========================
 OUTPUT FORMAT (STRICT JSON ONLY)
@@ -4292,51 +4320,56 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "project_type": "full-stack" | "backend" | "frontend" | "console" | "single",
   "stack": "dotnet" | "node" | "python" | "react" | "angular" | "java" | "mixed",
   "dotnet_framework": "webapi" | "console" | "mvc" | null,
-  "sections": [
+  "execution_mode": "MULTI_PHASE",
+  "phases": [
     {
-      "name": "Section Name",
-      "description": "What this section does",
-      "template_command": "cp -r ... .",
+      "name": "template_setup",
+      "description": "Copy template and generate scaffolding",
+      "review": false,
+      "build": false,
+      "build_commands": [],
       "working_directory": ".",
       "steps": [
-        {"step": 1, "action": "Copy template", "command": "cp -r ...", "type": "execute"},
-        {"step": 2, "action": "Implement X", "details": "...", "type": "code"}
-      ],
-      "carry_forward": []
-    }
-  ],
-  "final_report": true
-}
-
-EXAMPLE — Fullstack .NET + Angular (1 model, 1 controller, 2 endpoints, form + list):
-
-{
-  "project_type": "full-stack",
-  "stack": "dotnet",
-  "dotnet_framework": "webapi",
-  "sections": [
+        {"step": 1, "action": "Copy template", "command": "cp -r dotnettemplates/dotnetangularfullstack .", "type": "execute"},
+        {"step": 2, "action": "Install Angular deps", "command": "cd dotnetangularfullstack/angularapp && npm install", "type": "execute"},
+        {"step": 3, "action": "Generate components", "command": "cd dotnetangularfullstack/angularapp && npx ng g c components/product-list && npx ng g c components/product-form", "type": "generate"}
+      ]
+    },
     {
-      "name": "Full-Stack (dotnet + angular)",
-      "description": "Complete fullstack app with .NET Web API backend and Angular frontend",
-      "template_command": "cp -r dotnettemplates/dotnetangularfullstack .",
-      "working_directory": ".",
+      "name": "backend_implementation",
+      "description": "Implement .NET Web API backend",
+      "review": true,
+      "build": true,
+      "build_commands": ["cd dotnetangularfullstack/dotnetapp && dotnet build"],
+      "working_directory": "dotnetangularfullstack/dotnetapp",
       "steps": [
-        {"step": 1, "action": "Copy fullstack template", "command": "cp -r dotnettemplates/dotnetangularfullstack .", "type": "execute"},
-        {"step": 2, "action": "Install Angular dependencies", "command": "cd dotnetangularfullstack/angularapp && npm install", "type": "execute"},
-        {"step": 3, "action": "Generate Angular components", "command": "cd dotnetangularfullstack/angularapp && npx ng g c components/product-list && npx ng g c components/product-form", "type": "execute"},
-        {"step": 4, "action": "Generate Angular service", "command": "cd dotnetangularfullstack/angularapp && npx ng g s services/product", "type": "execute"},
-        {"step": 5, "action": "Implement backend model", "details": "Create Models/Product.cs with Id, Name, Price in dotnetangularfullstack/dotnetapp/", "type": "code"},
-        {"step": 6, "action": "Implement backend controller", "details": "Create Controllers/ProductsController.cs with GET and POST using static list in dotnetangularfullstack/dotnetapp/", "type": "code"},
-        {"step": 7, "action": "Implement Angular service", "details": "Write ProductService with HttpClient: getProducts() and addProduct() calling backend API at http://localhost:8080/api/products", "type": "code"},
-        {"step": 8, "action": "Implement product-list component", "details": "Display products in a styled list/card layout", "type": "code"},
-        {"step": 9, "action": "Implement product-form component", "details": "Form with name/price fields, submit calls service", "type": "code"},
-        {"step": 10, "action": "Setup Angular routing and module imports", "details": "Import HttpClientModule, FormsModule, add routes, update app.component.html", "type": "code"},
-        {"step": 11, "action": "Add attractive CSS", "details": "Global styles + component CSS: gradient bg, card shadows, button hover, responsive", "type": "code"},
-        {"step": 12, "action": "Batch review", "command": "scalable_batch_review(mode='FAST')", "type": "review"},
-        {"step": 13, "action": "Build backend", "command": "cd dotnetangularfullstack/dotnetapp && dotnet build", "type": "execute"},
-        {"step": 14, "action": "Build frontend", "command": "cd dotnetangularfullstack/angularapp && npx ng build", "type": "execute"}
-      ],
-      "carry_forward": []
+        {"step": 1, "action": "Implement model", "details": "Create Models/Product.cs with Id, Name, Price", "type": "code"},
+        {"step": 2, "action": "Implement controller", "details": "Create Controllers/ProductsController.cs with GET /api/products and POST /api/products using static list", "type": "code"}
+      ]
+    },
+    {
+      "name": "frontend_implementation",
+      "description": "Implement Angular frontend",
+      "review": true,
+      "build": true,
+      "build_commands": ["cd dotnetangularfullstack/angularapp && npx ng build"],
+      "working_directory": "dotnetangularfullstack/angularapp",
+      "steps": [
+        {"step": 1, "action": "Implement ProductService", "details": "HttpClient: getProducts(), addProduct() calling http://localhost:8080/api/products", "type": "code"},
+        {"step": 2, "action": "Implement product-list component", "details": "Display products in styled card layout", "type": "code"},
+        {"step": 3, "action": "Implement product-form component", "details": "Form with name/price, submit calls service", "type": "code"},
+        {"step": 4, "action": "Setup routing and modules", "details": "Import HttpClientModule, FormsModule, add routes, update app.component.html", "type": "code"},
+        {"step": 5, "action": "Add attractive CSS", "details": "Global + component CSS: gradient, shadows, hover, responsive", "type": "code"}
+      ]
+    },
+    {
+      "name": "integration_validation",
+      "description": "Final build verification",
+      "review": false,
+      "build": true,
+      "build_commands": ["cd dotnetangularfullstack/dotnetapp && dotnet build", "cd dotnetangularfullstack/angularapp && npx ng build"],
+      "working_directory": ".",
+      "steps": []
     }
   ],
   "final_report": true
@@ -4386,12 +4419,13 @@ def _needs_planning(messages) -> bool:
     return False
 
 
-def task_planner_agent(state: State):
+def planner_node(state: State):
     """
-    Task Planner: analyzes the user request and outputs a structured
-    section-based execution plan. Does NOT call tools — pure reasoning.
+    Planner Node: analyzes the user request and outputs a structured
+    MULTI-PHASE execution plan. Does NOT call tools — pure reasoning.
     
-    The plan is stored in state['task_plan'] and consumed by the orchestrator.
+    The plan is stored in state['task_plan'] and consumed by phase_executor_node.
+    Plan format uses 'phases' (not 'sections').
     """
     from langchain_core.messages import SystemMessage, AIMessage
     import json as _json
@@ -4407,19 +4441,19 @@ def task_planner_agent(state: State):
 
     # Add context about detected stack and framework
     if is_fullstack_da:
-        # Fullstack .NET + Angular — single template, single section
         template_cmd = TEMPLATE_COPY_COMMANDS.get("dotnetangularfullstack",
                                                    "cp -r dotnettemplates/dotnetangularfullstack .")
         planner_messages.append(SystemMessage(content=(
             f"DETECTED: FULLSTACK .NET + ANGULAR PROJECT\n"
             f"TEMPLATE COPY COMMAND: {template_cmd}\n"
             f"TEMPLATE STRUCTURE: dotnetangularfullstack/dotnetapp/ (backend) + dotnetangularfullstack/angularapp/ (frontend)\n"
-            f"CRITICAL: Use ONE section only. Copy ONE template. Interleave backend and frontend steps.\n"
+            f"CRITICAL: Use MULTI-PHASE plan. Phase 1=setup, Phase 2=backend, Phase 3=frontend, Phase 4=validation.\n"
             f"PORTS: backend=8080, frontend=8081 — DO NOT CHANGE ANY PORT CONFIGURATION.\n"
             f"ANGULAR: generate components with npx ng g c, services with npx ng g s.\n"
             f"ANGULAR: attractive CSS is MANDATORY. (as any) casting in test files.\n"
             f"NODE VERSION: 20 (do NOT change Angular version in package.json)\n"
-            f"BUILD: cd dotnetangularfullstack/dotnetapp && dotnet build; cd dotnetangularfullstack/angularapp && npx ng build\n"
+            f"BUILD BACKEND: cd dotnetangularfullstack/dotnetapp && dotnet build\n"
+            f"BUILD FRONTEND: cd dotnetangularfullstack/angularapp && npx ng build\n"
         )))
     elif stack == "dotnet":
         framework = detect_dotnet_framework(messages)
@@ -4460,6 +4494,14 @@ def task_planner_agent(state: State):
     # Validate JSON
     try:
         plan_obj = _json.loads(cleaned)
+        # Migrate old 'sections' format to 'phases' if needed
+        if "sections" in plan_obj and "phases" not in plan_obj:
+            plan_obj["phases"] = plan_obj.pop("sections")
+            plan_obj["execution_mode"] = "MULTI_PHASE"
+            for phase in plan_obj.get("phases", []):
+                phase.setdefault("review", True)
+                phase.setdefault("build", True)
+                phase.setdefault("build_commands", [])
         plan_json = _json.dumps(plan_obj, indent=2)
     except _json.JSONDecodeError:
         # If planner didn't return valid JSON, wrap it
@@ -4467,36 +4509,47 @@ def task_planner_agent(state: State):
             "project_type": "single",
             "stack": stack,
             "dotnet_framework": None,
-            "sections": [{
-                "name": "Main",
+            "execution_mode": "MULTI_PHASE",
+            "phases": [{
+                "name": "main",
                 "description": "Execute user request",
-                "template_command": None,
+                "review": False,
+                "build": False,
+                "build_commands": [],
                 "working_directory": ".",
                 "steps": [{"step": 1, "action": "Execute as requested", "type": "code"}],
-                "carry_forward": []
             }],
             "final_report": True
         }, indent=2)
+        plan_obj = _json.loads(plan_json)
 
     # Log the plan
+    num_phases = len(plan_obj.get("phases", []))
     import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            loop.create_task(broadcast_log(f"📋 Task Plan created with {len(plan_obj.get('sections', []))} section(s)"))
+            loop.create_task(broadcast_log(f"📋 Task Plan created with {num_phases} phase(s)"))
         else:
-            asyncio.run(broadcast_log(f"📋 Task Plan created with {len(plan_obj.get('sections', []))} section(s)"))
+            asyncio.run(broadcast_log(f"📋 Task Plan created with {num_phases} phase(s)"))
     except Exception:
         pass
 
-    # Return plan as AIMessage so orchestrator can see it, and store in state
-    # Initialize step tracking at section 0, step 0
+    # Reset phase tracking globals
+    _phase_created_files.clear()
+    _workspace_structure_cache.clear()
+
+    # Return plan as AIMessage so agent can see it, and initialize phase state
     plan_summary = f"[TASK PLAN]\n{plan_json}"
     return {
         "messages": [AIMessage(content=plan_summary)],
         "task_plan": plan_json,
-        "current_section_idx": 0,
+        "current_phase_idx": 0,
         "current_step_idx": 0,
+        "phase_status": "pending",
+        "phase_files": "[]",
+        "retry_count": 0,
+        "workspace_structure": "",
     }
 
 
@@ -4504,10 +4557,14 @@ def task_planner_agent(state: State):
 # review system can also use it without re-scanning messages.
 _current_dotnet_framework: str = "webapi"
 
-def _build_step_context(task_plan: str, section_idx: int, step_idx: int) -> str:
+def _build_phase_step_context(task_plan: str, phase_idx: int, step_idx: int) -> str:
     """
-    Build focused execution context for the CURRENT step only.
+    Build focused execution context for the CURRENT step within the CURRENT phase.
     Returns a prompt string telling the orchestrator exactly what to do NOW.
+    
+    Phase-based: uses plan['phases'] instead of plan['sections'].
+    Review and build are handled AUTOMATICALLY by the phase_executor/advance nodes
+    based on the phase flags — the agent never needs to call them explicitly.
     """
     import json as _json
     try:
@@ -4515,37 +4572,46 @@ def _build_step_context(task_plan: str, section_idx: int, step_idx: int) -> str:
     except _json.JSONDecodeError:
         return ""
 
-    sections = plan.get("sections", [])
-    if section_idx >= len(sections):
-        # All sections done — generate final report
+    phases = plan.get("phases", [])
+    if phase_idx >= len(phases):
+        # All phases done — generate final report
         return """
 ========================
-✅ ALL SECTIONS COMPLETE — GENERATE FINAL REPORT
+✅ ALL PHASES COMPLETE — GENERATE FINAL REPORT
 ========================
 
-All planned sections have been executed. Output the final consolidated report:
-- List what was built per section
+All planned phases have been executed, reviewed, and built successfully.
+Output the final consolidated report:
+- List what was built per phase
 - List files created
 - How to run the project
 - Status: complete
 """
 
-    section = sections[section_idx]
-    steps = section.get("steps", [])
-    section_name = section.get("name", f"Section {section_idx + 1}")
-    section_desc = section.get("description", "")
-    total_sections = len(sections)
+    phase = phases[phase_idx]
+    steps = phase.get("steps", [])
+    phase_name = phase.get("name", f"Phase {phase_idx + 1}")
+    phase_desc = phase.get("description", "")
+    total_phases = len(phases)
     total_steps = len(steps)
-    carry_forward = section.get("carry_forward", [])
+    will_review = phase.get("review", False)
+    will_build = phase.get("build", False)
 
     if step_idx >= total_steps:
-        # Current section done — this shouldn't happen (orchestrator advances),
-        # but handle gracefully
+        # Phase steps done — system will auto-run review + build
+        suffix = []
+        if will_review:
+            suffix.append("batch review")
+        if will_build:
+            suffix.append("build verification")
+        auto_note = f" (auto-running: {', '.join(suffix)})" if suffix else ""
         return f"""
 ========================
-✅ SECTION "{section_name}" COMPLETE
+✅ PHASE "{phase_name}" STEPS COMPLETE{auto_note}
 ========================
-Moving to next section. Carry forward: {', '.join(carry_forward) if carry_forward else 'none'}
+All implementation steps for this phase are done.
+The system will automatically handle review and build for this phase.
+Output: "✅ Phase '{phase_name}' implementation done."
 """
 
     current_step = steps[step_idx]
@@ -4555,46 +4621,40 @@ Moving to next section. Carry forward: {', '.join(carry_forward) if carry_forwar
     step_command = current_step.get("command", "")
     step_details = current_step.get("details", "")
 
-    # Build progress bar
-    completed_steps = step_idx
-    progress = f"[{completed_steps}/{total_steps} steps done]"
+    # Build progress
+    progress = f"[{step_idx}/{total_steps} steps done]"
 
-    # Build previous steps summary (what's already done in this section)
+    # Completed steps summary
     done_summary = ""
     if step_idx > 0:
-        done_items = []
-        for i in range(step_idx):
-            s = steps[i]
-            done_items.append(f"  ✅ Step {s.get('step', i+1)}: {s.get('action', '')}")
+        done_items = [f"  ✅ Step {steps[i].get('step', i+1)}: {steps[i].get('action', '')}"
+                      for i in range(step_idx)]
         done_summary = "COMPLETED STEPS:\n" + "\n".join(done_items) + "\n\n"
 
-    # Build upcoming steps preview (next 2 only, for awareness)
+    # Upcoming preview (next 2)
     upcoming = ""
     remaining = steps[step_idx + 1:step_idx + 3]
     if remaining:
-        upcoming_items = []
-        for s in remaining:
-            upcoming_items.append(f"  → Step {s.get('step', '?')}: {s.get('action', '')}")
+        upcoming_items = [f"  → Step {s.get('step', '?')}: {s.get('action', '')}" for s in remaining]
         upcoming = "\nUPCOMING (do NOT execute these yet):\n" + "\n".join(upcoming_items) + "\n"
 
-    # Build carry_forward from previous sections
-    prev_carry = ""
-    if section_idx > 0:
-        prev_sections = sections[:section_idx]
-        all_carry = []
-        for ps in prev_sections:
-            all_carry.extend(ps.get("carry_forward", []))
-        if all_carry:
-            prev_carry = "\nCONTEXT FROM PREVIOUS SECTIONS:\n" + "\n".join(f"  • {c}" for c in all_carry) + "\n"
+    # Phase info
+    phase_flags = []
+    if will_review:
+        phase_flags.append("review=ON (auto after all steps)")
+    if will_build:
+        build_cmds = phase.get("build_commands", [])
+        phase_flags.append(f"build=ON ({', '.join(build_cmds) if build_cmds else 'auto'})")
+    flags_str = " | ".join(phase_flags) if phase_flags else "review=OFF, build=OFF"
 
-    # Build the focused prompt
     ctx = f"""
 ========================
-📋 ACTIVE TASK PLAN — STEP-BY-STEP EXECUTION
+📋 PHASE-BASED EXECUTION — Phase {phase_idx + 1}/{total_phases}
 ========================
 
-SECTION: {section_name} ({section_idx + 1}/{total_sections})
-{section_desc}
+PHASE: {phase_name}
+{phase_desc}
+Flags: {flags_str}
 Progress: {progress}
 
 {done_summary}========================
@@ -4611,23 +4671,19 @@ Type: {step_type}
         ctx += f"Details: {step_details}\n"
 
     ctx += f"""
-EXECUTION RULES FOR THIS STEP:
-1. Execute ONLY this one step. Do NOT jump ahead to future steps.
-2. For "execute" type → call execute_terminal with the command.
-3. For "code" type → write ALL files for this step using manage_file(action='write').
-4. For "review" type → call scalable_batch_review(mode='FAST').
-5. You may make MULTIPLE tool calls for this step (e.g., read files first, then write).
-6. When you have completed ALL tool calls for this step, output a SHORT completion
-   message (1 line, e.g., "✅ Step N done: <what was done>"). This signals the system
-   to advance to the next step.
-7. Do NOT list or plan future steps. Just execute THIS step.
-8. Do NOT ask the user questions.
-{upcoming}{prev_carry}
-⛔ STEP COMPLETION FLOW:
-   1. Make tool calls to execute this step (one or more calls as needed).
-   2. When all tool calls for this step are done, output a SHORT text summary.
-   3. The system will then automatically advance to the next step.
-   Do NOT output a long summary. Just: "✅ Step N done: <brief>".
+EXECUTION RULES:
+1. Execute ONLY this one step. Do NOT jump ahead.
+2. For "execute"/"generate" type → call execute_terminal with the command.
+3. For "code" type → write files using manage_file(action='write').
+4. You may make MULTIPLE tool calls for this step.
+5. When done, output SHORT: "✅ Step {step_num} done: <brief>"
+6. Do NOT call scalable_batch_review or build commands — the system handles those automatically.
+7. Do NOT ask the user questions.
+{upcoming}
+⛔ STEP COMPLETION:
+   1. Make tool calls (one or more).
+   2. Output SHORT completion text.
+   3. System auto-advances to next step.
 """
     return ctx
 
@@ -4635,15 +4691,13 @@ EXECUTION RULES FOR THIS STEP:
 def orchestrator_agent(state: State):
     """Orchestrator: understands intent, plans, and invokes tools.
     
-    When a task_plan exists (set by planner), the orchestrator:
-    1. Reads current_section_idx and current_step_idx (set by plan_continue)
-    2. Skips checkpoint steps automatically
-    3. Injects ONLY the current step's context (not the full plan)
-    4. Invokes LLM with focused, single-step instructions
+    When a task_plan exists (set by planner_node), the orchestrator:
+    1. Reads current_phase_idx and current_step_idx
+    2. Injects ONLY the current step's context (not the full plan)
+    3. Invokes LLM with focused, single-step instructions
     
-    Step advancement is handled ONLY by plan_continue_node — NOT here.
-    This prevents premature advancement when the agent makes multiple
-    tool calls (discovery + actual work) within a single step.
+    Step advancement is handled by phase_advance_node — NOT here.
+    Phase review/build is handled by phase_review_build_node — NOT here.
     
     When no plan exists, it behaves as the normal orchestrator.
     """
@@ -4653,11 +4707,9 @@ def orchestrator_agent(state: State):
 
     messages = state["messages"]
     task_plan = state.get("task_plan", "")
-    section_idx = state.get("current_section_idx", 0)
+    phase_idx = state.get("current_phase_idx", 0)
     step_idx = state.get("current_step_idx", 0)
 
-    # NO auto-advance here. Step advancement is handled exclusively
-    # by plan_continue_node when the agent outputs text without tools.
     state_update = {}
     
     # Detect stack from user messages
@@ -4667,59 +4719,23 @@ def orchestrator_agent(state: State):
     enhanced_messages = [SystemMessage(content=SYSTEM_PROMPT)]
     
     if stack == "dotnet":
-        # Detect .NET sub-framework (webapi / console / mvc)
         framework = detect_dotnet_framework(messages)
         _current_dotnet_framework = framework
-        
-        # Inject framework-specific project rules
         fw_rules = DOTNET_FRAMEWORK_RULES.get(framework, DOTNET_WEBAPI_RULES)
         enhanced_messages.append(SystemMessage(content=fw_rules))
-        
-        # Inject framework-specific test rules
         fw_test_rules = DOTNET_FRAMEWORK_TEST_RULES.get(framework, DOTNET_WEBAPI_TEST_RULES)
         enhanced_messages.append(SystemMessage(content=fw_test_rules))
     else:
-        # Non-dotnet stacks: direct lookup
         stack_rules = STACK_RULES.get(stack, "")
         if stack_rules:
             enhanced_messages.append(SystemMessage(content=stack_rules))
-        
         stack_test_rules = STACK_TEST_RULES.get(stack, "")
         if stack_test_rules:
             enhanced_messages.append(SystemMessage(content=stack_test_rules))
     
     # If a task plan exists, inject ONLY the current step context
-    # Auto-skip checkpoint steps (advance in state_update so agent sees next real step)
     if task_plan:
-        try:
-            _plan = _json.loads(task_plan)
-            _sections = _plan.get("sections", [])
-            # Skip checkpoint/status steps that have no real work
-            while section_idx < len(_sections):
-                _sec = _sections[section_idx]
-                _steps = _sec.get("steps", [])
-                if step_idx < len(_steps):
-                    _cur = _steps[step_idx]
-                    _action = _cur.get("action", "").lower()
-                    _type = _cur.get("type", "").lower()
-                    is_checkpoint = (
-                        _type == "checkpoint" or
-                        "checkpoint" in _action or
-                        "section complete" in _action
-                    ) and not _cur.get("command")
-                    if is_checkpoint:
-                        step_idx += 1
-                        if step_idx >= len(_steps):
-                            section_idx += 1
-                            step_idx = 0
-                        state_update["current_section_idx"] = section_idx
-                        state_update["current_step_idx"] = step_idx
-                        continue
-                break
-        except _json.JSONDecodeError:
-            pass
-
-        step_context = _build_step_context(task_plan, section_idx, step_idx)
+        step_context = _build_phase_step_context(task_plan, phase_idx, step_idx)
         if step_context:
             enhanced_messages.append(SystemMessage(content=step_context))
     
@@ -4732,140 +4748,480 @@ def orchestrator_agent(state: State):
 
 
 def _plan_has_remaining_steps(state: State) -> bool:
-    """Check if the active plan still has steps to execute."""
+    """Check if the active plan still has steps/phases to execute."""
     import json as _json
     task_plan = state.get("task_plan", "")
     if not task_plan:
         return False
     try:
         plan = _json.loads(task_plan)
-        sections = plan.get("sections", [])
-        section_idx = state.get("current_section_idx", 0)
+        phases = plan.get("phases", [])
+        phase_idx = state.get("current_phase_idx", 0)
         step_idx = state.get("current_step_idx", 0)
-        if section_idx >= len(sections):
+        if phase_idx >= len(phases):
             return False
-        current_section = sections[section_idx]
-        total_steps = len(current_section.get("steps", []))
-        # Still has steps in current section, or has more sections
+        current_phase = phases[phase_idx]
+        total_steps = len(current_phase.get("steps", []))
+        # Still has steps in current phase
         if step_idx < total_steps:
             return True
-        if section_idx + 1 < len(sections):
-            return True
-        return False
+        # Current phase steps done but review/build still pending
+        # (the phase_advance node handles this — let it run)
+        return True
     except _json.JSONDecodeError:
         return False
 
 
-def plan_continue_node(state: State):
+def _phase_steps_done(state: State) -> bool:
+    """Check if all steps within the current phase are complete (but review/build may still be needed)."""
+    import json as _json
+    task_plan = state.get("task_plan", "")
+    if not task_plan:
+        return True
+    try:
+        plan = _json.loads(task_plan)
+        phases = plan.get("phases", [])
+        phase_idx = state.get("current_phase_idx", 0)
+        step_idx = state.get("current_step_idx", 0)
+        if phase_idx >= len(phases):
+            return True
+        phase = phases[phase_idx]
+        total_steps = len(phase.get("steps", []))
+        return step_idx >= total_steps
+    except _json.JSONDecodeError:
+        return True
+
+
+def _is_last_phase(state: State) -> bool:
+    """Check if the current phase is the last one (integration_validation)."""
+    import json as _json
+    task_plan = state.get("task_plan", "")
+    if not task_plan:
+        return True
+    try:
+        plan = _json.loads(task_plan)
+        phases = plan.get("phases", [])
+        phase_idx = state.get("current_phase_idx", 0)
+        return phase_idx >= len(phases) - 1
+    except _json.JSONDecodeError:
+        return True
+
+
+def phase_advance_node(state: State):
     """
-    Step advancement node: fires when the orchestrator outputs text without
-    tool calls (meaning the current step is complete). This node:
-    1. Advances current_step_idx (and current_section_idx if section done)
-    2. Skips checkpoint steps
-    3. Injects a nudge message to continue
-    4. Loops back to the orchestrator for the next step
+    Step/Phase advancement node. Fires when the orchestrator outputs text
+    without tool calls (step complete signal). This node decides:
     
-    This is the ONLY place where step advancement happens.
+    A) If more steps in current phase → advance step, loop back to agent
+    B) If all steps done → trigger review+build (route to phase_review_build_node)
+    C) If all phases done → route to integration_validator or END
+    
+    This is the ONLY place where step/phase advancement happens.
     """
     from langchain_core.messages import SystemMessage
     import json as _json
 
     task_plan = state.get("task_plan", "")
-    section_idx = state.get("current_section_idx", 0)
+    phase_idx = state.get("current_phase_idx", 0)
     step_idx = state.get("current_step_idx", 0)
 
     state_update = {}
 
-    if task_plan:
-        try:
-            plan = _json.loads(task_plan)
-            sections = plan.get("sections", [])
+    if not task_plan:
+        return {"messages": [SystemMessage(content="⚡ Continue with the next action.")]}
 
-            if section_idx < len(sections):
-                current_section = sections[section_idx]
-                total_steps = len(current_section.get("steps", []))
+    try:
+        plan = _json.loads(task_plan)
+        phases = plan.get("phases", [])
+    except _json.JSONDecodeError:
+        return {"messages": [SystemMessage(content="⚡ Continue with the next action.")]}
 
-                # Advance to next step
-                new_step = step_idx + 1
-                new_section = section_idx
+    if phase_idx >= len(phases):
+        return {"messages": [SystemMessage(content="✅ All phases complete. Generate the final report.")]}
 
-                if new_step >= total_steps:
-                    # Section complete — move to next section
-                    new_section = section_idx + 1
-                    new_step = 0
+    phase = phases[phase_idx]
+    total_steps = len(phase.get("steps", []))
+    phase_name = phase.get("name", f"Phase {phase_idx + 1}")
 
-                # Skip checkpoint steps in the new position
-                while new_section < len(sections):
-                    sec = sections[new_section]
-                    steps = sec.get("steps", [])
-                    if new_step < len(steps):
-                        cur = steps[new_step]
-                        _action = cur.get("action", "").lower()
-                        _type = cur.get("type", "").lower()
-                        is_checkpoint = (
-                            _type == "checkpoint" or
-                            "checkpoint" in _action or
-                            "section complete" in _action
-                        ) and not cur.get("command")
-                        if is_checkpoint:
-                            new_step += 1
-                            if new_step >= len(steps):
-                                new_section += 1
-                                new_step = 0
-                            continue
-                    break
+    # Advance to next step
+    new_step = step_idx + 1
+    # Edge case: phase with 0 steps → immediately mark as steps_done
+    if total_steps == 0:
+        new_step = 0
 
-                state_update["current_section_idx"] = new_section
-                state_update["current_step_idx"] = new_step
-
-                # Build progress message
-                if new_section < len(sections):
-                    next_sec = sections[new_section]
-                    next_steps = next_sec.get("steps", [])
-                    if new_step < len(next_steps):
-                        next_step_info = next_steps[new_step]
-                        nudge = (
-                            f"⚡ Step completed. Moving to: "
-                            f"Section '{next_sec.get('name', '')}' → "
-                            f"Step {next_step_info.get('step', new_step+1)}: "
-                            f"{next_step_info.get('action', '')}. "
-                            f"Execute this step NOW — make a tool call."
-                        )
-                    else:
-                        nudge = "⚡ Section completed. Moving to next section."
-                else:
-                    nudge = "✅ All sections complete. Generate the final report."
-            else:
-                nudge = "✅ All sections complete. Generate the final report."
-        except _json.JSONDecodeError:
-            nudge = "⚡ Continue with the next action."
+    if new_step < total_steps:
+        # More steps in this phase → advance and loop back to agent
+        state_update["current_step_idx"] = new_step
+        next_step_info = phase["steps"][new_step]
+        nudge = (
+            f"⚡ Step completed. Phase '{phase_name}' → "
+            f"Step {next_step_info.get('step', new_step+1)}: "
+            f"{next_step_info.get('action', '')}. "
+            f"Execute this step NOW."
+        )
+        state_update["phase_status"] = "running"
     else:
-        nudge = "⚡ Continue with the next action."
+        # All steps in this phase are done.
+        # Signal that phase implementation is complete → review+build needed.
+        # We set phase_status to "steps_done" so the router knows to go to review_build.
+        state_update["current_step_idx"] = new_step  # past last step
+        state_update["phase_status"] = "steps_done"
+        suffix = []
+        if phase.get("review"):
+            suffix.append("batch review")
+        if phase.get("build"):
+            suffix.append("build")
+        auto_note = f" Auto-running: {', '.join(suffix)}." if suffix else ""
+        nudge = f"✅ Phase '{phase_name}' implementation complete.{auto_note}"
 
     result = {"messages": [SystemMessage(content=nudge)]}
     result.update(state_update)
     return result
 
 
+def phase_review_build_node(state: State):
+    """
+    Runs per-phase batch review and build commands automatically.
+    Fires after all steps in a phase are done (phase_status == 'steps_done').
+    
+    - If phase.review=true → calls scalable_batch_review (only for files created in this phase)
+    - If phase.build=true → runs build_commands via execute_terminal
+    - If build fails → increments retry_count (up to MAX_PHASE_RETRIES), marks failed
+    - If all succeeds → advances to next phase, resets step_idx and retry_count
+    """
+    from langchain_core.messages import SystemMessage, AIMessage
+    import json as _json
+    import subprocess
+    import hashlib
+
+    task_plan = state.get("task_plan", "")
+    phase_idx = state.get("current_phase_idx", 0)
+    retry_count = state.get("retry_count", 0)
+    state_update = {}
+    log_parts = []
+
+    if not task_plan:
+        return {"messages": [SystemMessage(content="⚡ Continue.")]}
+
+    try:
+        plan = _json.loads(task_plan)
+        phases = plan.get("phases", [])
+    except _json.JSONDecodeError:
+        return {"messages": [SystemMessage(content="⚡ Continue.")]}
+
+    if phase_idx >= len(phases):
+        return {"messages": [SystemMessage(content="✅ All phases complete.")]}
+
+    phase = phases[phase_idx]
+    phase_name = phase.get("name", f"Phase {phase_idx + 1}")
+    workspace = get_workspace_path()
+
+    # ── PER-PHASE REVIEW ──
+    if phase.get("review", False):
+        # Only review files created/modified in THIS phase
+        phase_files_to_review = list(_phase_created_files)
+        if phase_files_to_review:
+            # Filter to code files only (skip configs, non-code)
+            code_files = []
+            for fp in phase_files_to_review:
+                ext = os.path.splitext(fp)[1].lower()
+                if ext not in _SKIP_EXTENSIONS and "node_modules" not in fp:
+                    code_files.append(fp)
+
+            if code_files:
+                # Check hashes — skip unchanged
+                files_to_review = []
+                for fp in code_files:
+                    try:
+                        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+                        h = hashlib.sha256(content.encode()).hexdigest()
+                        if _review_cache.get(fp) != h:
+                            files_to_review.append((fp, content, h))
+                    except Exception:
+                        pass
+
+                if files_to_review:
+                    review_llm = _get_review_llm()
+                    # Group by layer for efficient review
+                    layer_groups = {}
+                    for fp, content, h in files_to_review:
+                        layer = _classify_layer(fp)
+                        layer_groups.setdefault(layer, []).append((fp, content, h))
+
+                    issues_found = 0
+                    for layer, file_group in layer_groups.items():
+                        # Build review payload
+                        file_payloads = []
+                        for fp, content, h in file_group:
+                            # Chunk if too large
+                            lines = content.split("\n")
+                            if len(lines) > _MAX_LINES_PER_CHUNK:
+                                chunk = "\n".join(lines[:_MAX_LINES_PER_CHUNK])
+                                file_payloads.append({"path": fp, "content": chunk + "\n// ... truncated"})
+                            else:
+                                file_payloads.append({"path": fp, "content": content})
+
+                        review_prompt = REVIEW_FAST_PROMPT if REVIEW_MODE == "FAST" else REVIEW_STRICT_PROMPT
+                        payload = _json.dumps({"mode": REVIEW_MODE, "files": file_payloads})
+                        try:
+                            from langchain_core.messages import HumanMessage as _HM
+                            resp = review_llm.invoke([
+                                SystemMessage(content=review_prompt),
+                                _HM(content=payload)
+                            ])
+                            review_result = _json.loads(resp.content.strip())
+                            for fr in review_result.get("files", []):
+                                if fr.get("patch_required") and fr.get("unified_diff"):
+                                    # Apply patch using unified diff
+                                    patch_path = fr["path"]
+                                    if not os.path.isabs(patch_path):
+                                        patch_path = os.path.join(workspace, patch_path)
+                                    try:
+                                        with open(patch_path, "r", encoding="utf-8") as pf:
+                                            original = pf.read()
+                                        patched = _apply_unified_diff(original, fr["unified_diff"])
+                                        if patched and patched != original:
+                                            with open(patch_path, "w", encoding="utf-8") as pf:
+                                                pf.write(patched)
+                                    except Exception:
+                                        pass
+                                    issues_found += 1
+                        except Exception:
+                            pass
+
+                    # Update review cache for all reviewed files
+                    for fp, content, h in files_to_review:
+                        # Re-read in case patch was applied
+                        try:
+                            with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                                new_content = f.read()
+                            _review_cache[fp] = hashlib.sha256(new_content.encode()).hexdigest()
+                        except Exception:
+                            _review_cache[fp] = h
+
+                    log_parts.append(f"📝 Review: {len(files_to_review)} file(s), {issues_found} patch(es)")
+                else:
+                    log_parts.append("📝 Review: all files unchanged, skipped")
+            else:
+                log_parts.append("📝 Review: no code files to review")
+        else:
+            log_parts.append("📝 Review: no files created in this phase")
+
+    # ── PER-PHASE BUILD ──
+    build_failed = False
+    if phase.get("build", False):
+        build_commands = phase.get("build_commands", [])
+        for cmd in build_commands:
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, cwd=workspace,
+                    capture_output=True, text=True, timeout=120
+                )
+                if result.returncode != 0:
+                    build_failed = True
+                    error_output = (result.stderr or result.stdout or "Unknown error")[:500]
+                    log_parts.append(f"❌ Build failed: {cmd}\n{error_output}")
+                else:
+                    log_parts.append(f"✅ Build passed: {cmd}")
+            except subprocess.TimeoutExpired:
+                build_failed = True
+                log_parts.append(f"❌ Build timed out: {cmd}")
+            except Exception as e:
+                build_failed = True
+                log_parts.append(f"❌ Build error: {cmd} — {str(e)}")
+
+    # ── DECIDE NEXT STATE ──
+    if build_failed:
+        if retry_count < MAX_PHASE_RETRIES:
+            state_update["retry_count"] = retry_count + 1
+            state_update["phase_status"] = "build_failed"
+            # Go back to agent to fix the build error
+            # Reset step_idx to the last step so agent can see context
+            total_steps = len(phase.get("steps", []))
+            state_update["current_step_idx"] = total_steps  # past end = "fix mode"
+            nudge = (
+                f"❌ Phase '{phase_name}' build FAILED (attempt {retry_count + 1}/{MAX_PHASE_RETRIES}). "
+                f"Fix the error and retry. Error details:\n{chr(10).join(log_parts)}"
+            )
+        else:
+            state_update["phase_status"] = "failed"
+            nudge = (
+                f"❌ Phase '{phase_name}' build FAILED after {MAX_PHASE_RETRIES} attempts. "
+                f"Marking as failed. Details:\n{chr(10).join(log_parts)}"
+            )
+    else:
+        # Phase complete — advance to next phase
+        state_update["current_phase_idx"] = phase_idx + 1
+        state_update["current_step_idx"] = 0
+        state_update["retry_count"] = 0
+        state_update["phase_status"] = "completed"
+        state_update["phase_files"] = "[]"
+        # Clear per-phase file tracking
+        _phase_created_files.clear()
+
+        next_phase_idx = phase_idx + 1
+        if next_phase_idx < len(phases):
+            next_phase = phases[next_phase_idx]
+            nudge = (
+                f"✅ Phase '{phase_name}' complete. "
+                f"{' | '.join(log_parts)}\n"
+                f"⚡ Moving to Phase {next_phase_idx + 1}: '{next_phase.get('name', '')}'. "
+                f"Execute the first step NOW."
+            )
+        else:
+            nudge = (
+                f"✅ Phase '{phase_name}' complete. {' | '.join(log_parts)}\n"
+                f"✅ All phases complete. Generate the final report."
+            )
+
+    result_msg = {"messages": [SystemMessage(content=nudge)]}
+    result_msg.update(state_update)
+    return result_msg
+
+
+def integration_validator_node(state: State):
+    """
+    Final validation node. Runs after all phases complete.
+    Verifies:
+    - Backend builds
+    - Frontend builds (if applicable)
+    - Ports are preserved (not modified)
+    - Reports any issues
+    """
+    from langchain_core.messages import SystemMessage
+    import json as _json
+    import subprocess
+
+    task_plan = state.get("task_plan", "")
+    workspace = get_workspace_path()
+    validation_results = []
+
+    try:
+        plan = _json.loads(task_plan) if task_plan else {}
+    except _json.JSONDecodeError:
+        plan = {}
+
+    phases = plan.get("phases", [])
+
+    # Collect all build commands from all phases
+    all_build_cmds = []
+    for phase in phases:
+        all_build_cmds.extend(phase.get("build_commands", []))
+
+    # Deduplicate
+    seen = set()
+    unique_cmds = []
+    for cmd in all_build_cmds:
+        if cmd not in seen:
+            seen.add(cmd)
+            unique_cmds.append(cmd)
+
+    # Run each build command as a final verification
+    for cmd in unique_cmds:
+        try:
+            result = subprocess.run(
+                cmd, shell=True, cwd=workspace,
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                validation_results.append(f"✅ {cmd}")
+            else:
+                err = (result.stderr or result.stdout or "Unknown error")[:300]
+                validation_results.append(f"❌ {cmd}: {err}")
+        except Exception as e:
+            validation_results.append(f"❌ {cmd}: {str(e)}")
+
+    # Check port preservation (verify config files weren't modified to change ports)
+    port_check = "✅ Ports preserved (no validation issues)"
+    # Simple check: look for common port config files
+    for port_file in [
+        "dotnetangularfullstack/dotnetapp/Properties/launchSettings.json",
+        "dotnetangularfullstack/angularapp/proxy.conf.json",
+    ]:
+        full_path = os.path.join(workspace, port_file)
+        if os.path.exists(full_path):
+            try:
+                with open(full_path, "r") as f:
+                    content = f.read()
+                if "8080" in content or "8081" in content:
+                    pass  # ports preserved
+                else:
+                    port_check = f"⚠️ Port config may have been modified in {port_file}"
+            except Exception:
+                pass
+    validation_results.append(port_check)
+
+    summary = "\n".join(validation_results)
+    nudge = (
+        f"🔍 INTEGRATION VALIDATION COMPLETE:\n{summary}\n\n"
+        f"✅ All phases complete. Generate the FINAL REPORT now."
+    )
+
+    return {
+        "messages": [SystemMessage(content=nudge)],
+        "phase_status": "validated",
+    }
+
+
 def route_tools_or_end(state: State):
     """
     Router: examines the orchestrator's last message.
-    - If tool calls → route to the appropriate specialized node
-    - If no tool calls AND plan has remaining steps → route to plan_continue (loop back)
-    - If no tool calls AND no plan / plan done → END
+    - If tool calls → route to the appropriate specialized tool node
+    - If no tool calls AND phase has remaining steps → route to phase_advance
+    - If no tool calls AND phase steps done (needs review/build) → route to phase_review_build
+    - If no tool calls AND all phases done → route to integration_validator or END
     
-    This preserves the server.py streaming contract:
+    Preserves the server.py streaming contract:
     - Orchestrator outputs under key 'agent'
-    - Tool nodes output under their node name (checked by server.py)
+    - Tool nodes output under their node name
     """
+    import json as _json
     last_message = state["messages"][-1]
     
-    # No tool calls
+    # No tool calls → step/phase advancement
     if not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
-        # If plan is active with remaining steps → loop back via plan_continue
-        if _plan_has_remaining_steps(state):
-            return "plan_continue"
-        return END
+        task_plan = state.get("task_plan", "")
+        if not task_plan:
+            return END
+
+        phase_status = state.get("phase_status", "pending")
+
+        # If build failed and agent was asked to fix → go back through advance
+        if phase_status == "build_failed":
+            # Agent has fixed code → re-run review+build
+            return "phase_review_build"
+
+        try:
+            plan = _json.loads(task_plan)
+            phases = plan.get("phases", [])
+            phase_idx = state.get("current_phase_idx", 0)
+            step_idx = state.get("current_step_idx", 0)
+
+            if phase_idx >= len(phases):
+                # All phases done — run integration validator (or END if already validated)
+                if phase_status == "validated":
+                    return END
+                return "integration_validator"
+
+            phase = phases[phase_idx]
+            total_steps = len(phase.get("steps", []))
+
+            if step_idx < total_steps:
+                # More steps in current phase → advance step
+                return "phase_advance"
+            else:
+                # All steps done → check if review/build needed
+                if phase.get("review") or phase.get("build"):
+                    if phase_status != "steps_done":
+                        return "phase_advance"  # let advance set status first
+                    return "phase_review_build"
+                else:
+                    # No review/build — just advance to next phase
+                    return "phase_advance"
+
+        except _json.JSONDecodeError:
+            return END
     
     # Determine which specialized agent(s) the tool calls target
     targets = set()
@@ -4873,23 +5229,29 @@ def route_tools_or_end(state: State):
         agent_name = TOOL_TO_AGENT.get(tc["name"], "action")
         targets.add(agent_name)
     
-    # If all tool calls go to the same specialized agent, route there
     if len(targets) == 1:
         return targets.pop()
     
-    # Mixed tools from different agents → use combined fallback
     return "action"
 
 
 # -------------------------------------------------
 # 6. Build Multi-Agent LangGraph Workflow
 # -------------------------------------------------
+# PHASE-BASED ARCHITECTURE:
+#   START → (planner_node | agent) → agent ←→ tool_nodes
+#   agent → phase_advance → agent (step loop)
+#   agent → phase_review_build → agent (review+build per phase)
+#   agent → integration_validator → agent → END (final validation)
+#
+# Key routing:
+#   route_start: decides planner or direct agent
+#   route_tools_or_end: tool dispatch, phase_advance, phase_review_build, integration_validator, END
+
 workflow = StateGraph(State)
 
 
 # --- Entry Router ---
-# Decides whether the user's request should go to the planner first or
-# directly to the orchestrator.
 def route_start(state: State):
     """
     START router:
@@ -4902,35 +5264,33 @@ def route_start(state: State):
     return "agent"
 
 
-# --- Agent Nodes ---
-# 0) Task Planner — creates structured plan, no tools
-workflow.add_node("planner", task_planner_agent)
+# --- Nodes ---
+
+# 0) Planner Node — creates structured multi-phase plan, no tools
+workflow.add_node("planner", planner_node)
 
 # 1) Orchestrator (named "agent" to preserve server.py streaming key)
 workflow.add_node("agent", orchestrator_agent)
 
 # --- Specialized Tool Agent Nodes ---
-# 3) Workspace Discovery Agent
 workflow.add_node("workspace_action", workspace_tool_node)
-# 4) File Operations Agent
 workflow.add_node("file_action", file_tool_node)
-# 5) Execution Agent
 workflow.add_node("execution_action", execution_tool_node)
-# 6) Template Agent
 workflow.add_node("template_action", template_tool_node)
-# 7) Test Agent
 workflow.add_node("test_action", test_tool_node)
-# 8) Documentation Agent
 workflow.add_node("documentation_action", doc_tool_node)
-# 9) Review Agent — ToolNode for scalable_batch_review (called explicitly by orchestrator)
 workflow.add_node("review_action", review_tool_node)
 
 # Fallback: combined tool node for mixed multi-tool calls
 workflow.add_node("action", all_tool_node)
 
-# 10) Plan Continue — passthrough node that loops back to orchestrator
-#     when the LLM outputs text without tool calls but the plan still has steps
-workflow.add_node("plan_continue", plan_continue_node)
+# --- Phase Orchestration Nodes ---
+# Phase Advance: advances step/phase counter, loops back to agent
+workflow.add_node("phase_advance", phase_advance_node)
+# Phase Review+Build: runs batch review + build commands per phase
+workflow.add_node("phase_review_build", phase_review_build_node)
+# Integration Validator: final validation after all phases complete
+workflow.add_node("integration_validator", integration_validator_node)
 
 # --- Edges ---
 # START → conditional: planner or agent
@@ -4939,13 +5299,20 @@ workflow.add_conditional_edges(START, route_start, {
     "agent": "agent",
 })
 
-# Planner → Orchestrator (planner output feeds into orchestrator as context)
+# Planner → Orchestrator (plan output feeds into orchestrator as context)
 workflow.add_edge("planner", "agent")
 
-# Plan Continue → back to Orchestrator (loop to pick up next step)
-workflow.add_edge("plan_continue", "agent")
+# Phase Advance → back to Orchestrator (loop to pick up next step)
+workflow.add_edge("phase_advance", "agent")
 
-# Orchestrator → Router (dispatches to specialized agent, plan_continue, or END)
+# Phase Review+Build → back to Orchestrator
+# (if build failed, agent fixes code; if passed, agent moves to next phase)
+workflow.add_edge("phase_review_build", "agent")
+
+# Integration Validator → back to Orchestrator (for final report generation)
+workflow.add_edge("integration_validator", "agent")
+
+# Orchestrator → Router (dispatches to tool nodes, phase management, or END)
 ALL_TOOL_ROUTES = {
     "workspace_action": "workspace_action",
     "file_action": "file_action",
@@ -4954,8 +5321,10 @@ ALL_TOOL_ROUTES = {
     "test_action": "test_action",
     "documentation_action": "documentation_action",
     "review_action": "review_action",
-    "action": "action",  # fallback for mixed tool calls
-    "plan_continue": "plan_continue",  # loop back when plan has remaining steps
+    "action": "action",
+    "phase_advance": "phase_advance",
+    "phase_review_build": "phase_review_build",
+    "integration_validator": "integration_validator",
     END: END,
 }
 workflow.add_conditional_edges("agent", route_tools_or_end, ALL_TOOL_ROUTES)
@@ -4968,14 +5337,13 @@ for agent_node in ["workspace_action", "file_action", "execution_action",
 
 
 app = workflow.compile(
-    # Increase recursion limit to prevent GraphRecursionError
     checkpointer=None,
     debug=False
 )
 
-# Configure recursion limit (agent→tools→agent cycles; increase if long tasks hit limit)
+# Configure recursion limit (agent→tools→agent cycles; increase for long multi-phase tasks)
 app.config = {
-    "recursion_limit": 150
+    "recursion_limit": 200
 }
 
 # -------------------------------------------------
@@ -4992,8 +5360,12 @@ if __name__ == "__main__":
             )
         ],
         "task_plan": "",
-        "current_section_idx": 0,
+        "current_phase_idx": 0,
         "current_step_idx": 0,
+        "phase_status": "pending",
+        "phase_files": "[]",
+        "retry_count": 0,
+        "workspace_structure": "",
     }
 
     for output in app.stream(test_input):

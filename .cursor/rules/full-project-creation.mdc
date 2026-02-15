@@ -1,33 +1,26 @@
 ---
-description: Project creation flow — planner creates sections, orchestrator executes them
+description: Project creation flow — planner creates phases, executor runs them sequentially
 alwaysApply: true
 ---
 
-🔧 TASK: PROJECT CREATION — PLANNER-DRIVEN SECTION-BASED EXECUTION
+🔧 TASK: PROJECT CREATION — PHASE-BASED EXECUTION
 
-When the user asks to create a project, the Task Planner automatically creates a structured plan.
-The orchestrator then follows the plan section-by-section.
+When the user asks to create a project, the Planner Node automatically creates a multi-phase plan.
+The system then executes each phase sequentially with automatic review + build per phase.
 
 🎯 GOAL
 
 For ANY project creation request:
-1. The Task Planner creates a section-based plan (backend, frontend, etc.)
-2. The orchestrator executes each section fully before moving to the next
-3. Each section follows: template copy → solution code → review → build
+1. Planner creates a MULTI-PHASE plan (template_setup → backend → frontend → validation)
+2. Each phase executes its steps, then auto-runs review + build
+3. Build failures trigger auto-fix with up to 3 retries per phase
+4. After all phases pass → integration validation → final report
 
-For FULLSTACK .NET + ANGULAR:
-  Use ONE section (template has both dotnetapp/ and angularapp/).
-  Copy ONCE: cp -r dotnettemplates/dotnetangularfullstack .
-  Work on backend and frontend simultaneously (interleaved steps).
-  Do NOT change ports — backend: 8080, frontend: 8081 (pre-configured).
-
-For other full-stack combos (e.g., dotnet + plain HTML):
-  Section 1 = Backend (complete it fully)
-  Section 2 = Frontend (complete it fully, using backend context)
+EXECUTION_MODE: MULTI_PHASE
 
 🚦 CRITICAL EXECUTION RULES (MANDATORY)
 
-The system feeds you ONE STEP AT A TIME from the plan.
+The system feeds you ONE STEP AT A TIME from the current phase.
 
 Execute ONLY the current step shown — do NOT jump ahead.
 
@@ -37,17 +30,30 @@ When you finish ALL tool calls for a step, output a SHORT completion message:
   "✅ Step N done: <brief>"
 This signals the system to advance to the next step automatically.
 
+DO NOT call scalable_batch_review yourself — the system runs it automatically per phase.
+DO NOT call build commands yourself — the system runs them automatically per phase.
 DO NOT list or plan future steps — the system handles sequencing.
-
 DO NOT wait for user confirmation between steps.
-
 DO NOT ask follow-up questions.
-
-DO NOT re-discover the workspace between steps — reuse carry_forward data.
 
 ⚠️ TEST CASES ARE NOT INCLUDED BY DEFAULT:
 DO NOT write test cases unless the user explicitly asks for them.
-If the user later asks "add test cases" or "write tests", then proceed with test phase.
+
+📋 PHASE STRUCTURE
+
+Phase 1 — template_setup (review=OFF, build=OFF):
+  Copy template, install deps, generate components/services
+
+Phase 2 — backend_implementation (review=ON, build=ON):
+  Implement models, services, controllers
+  → Auto review + build after all steps
+
+Phase 3 — frontend_implementation (review=ON, build=ON):
+  Implement services, components, routing, CSS
+  → Auto review + build after all steps
+
+Phase 4 — integration_validation (review=OFF, build=ON):
+  Final verification of all builds
 
 📋 TEMPLATE COPY — KNOWN vs UNKNOWN
 
@@ -61,62 +67,37 @@ For KNOWN templates, execute directly — NO discovery:
     → Copy ONCE — do NOT copy separate templates.
     → Do NOT change ports: backend=8080, frontend=8081 (already configured).
 
-For Angular AFTER copy:
-  cd <angularapp-folder> && npm install
-  Generate components: npx ng g c <component-name>
-  Generate services: npx ng g s services/<service-name>
-  Then write solution code into generated files
+NPM INSTALL OPTIMIZATION:
+  npm install is automatically skipped if node_modules/ already exists.
 
-For UNKNOWN templates, discover first:
-  list_dir → find template → copy ROOT folder
+📝 FULLSTACK .NET + ANGULAR EXAMPLE
 
-🧠 SECTION EXECUTION FLOW (PER SECTION)
-
-STEP 1 — TEMPLATE COPY (if applicable)
-  Known template → direct command, no discovery
-  Unknown template → discover then copy
-
-STEP 2 — SOLUTION IMPLEMENTATION
-  Inside the copied root:
-  Create all required models/classes
-  Create services / controllers / data access
-  Follow existing solution patterns from the template
-  Do NOT modify config files or project files unless strictly required
-
-STEP 3 — BATCH REVIEW + BUILD VERIFICATION
-  Call scalable_batch_review(mode="FAST")
-  Run build command (dotnet build, npx ng build, etc.)
-  If build FAILS → fix → retry until it passes
-
-STEP 4 — SECTION COMPLETE → NEXT SECTION
-  Log what was completed
-  Carry forward context (endpoints, schema, etc.) to next section
-  Immediately continue to next section
-
-📝 FULLSTACK .NET + ANGULAR EXAMPLE (single section)
-
-Section 1 — Full-Stack:
+Phase 1 — template_setup:
   [Execute: cp -r dotnettemplates/dotnetangularfullstack .]
-  [Execute: cd dotnetangularfullstack/angularapp && npm install]
-  [Execute: npx ng g c components/product-list && npx ng g c components/product-form]
-  [Execute: npx ng g s services/product]
-  [Write: Backend models in dotnetangularfullstack/dotnetapp/Models/]
-  [Write: Backend controllers in dotnetangularfullstack/dotnetapp/Controllers/]
-  [Write: Angular service code, component code, routing, CSS]
-  [Review: scalable_batch_review]
-  [Build: cd dotnetangularfullstack/dotnetapp && dotnet build]
-  [Build: cd dotnetangularfullstack/angularapp && npx ng build]
+  [Execute: cd dotnetangularfullstack/angularapp && npm install]  (skipped if node_modules exists)
+  [Generate: npx ng g c components/product-list]
+  [Generate: npx ng g s services/product]
 
-Final Report:
-  List what was built, how to run
+Phase 2 — backend_implementation:
+  [Write: Models/Product.cs]
+  [Write: Controllers/ProductsController.cs]
+  → Auto: batch review → dotnet build
+
+Phase 3 — frontend_implementation:
+  [Write: Angular service, components, routing, CSS]
+  → Auto: batch review → npx ng build
+
+Phase 4 — integration_validation:
+  → Auto: dotnet build + npx ng build (final check)
+
+Final Report: list what was built, how to run
 
 ❗ RULES
 
 🚫 DO NOT add test cases unless user explicitly asks
-🚫 DO NOT add description generation unless user explicitly asks
-🚫 DO NOT stop between sections
+🚫 DO NOT call scalable_batch_review or build commands — system handles per phase
 🚫 DO NOT change port configuration (backend: 8080, frontend: 8081)
-🚫 DO NOT copy separate templates for fullstack .NET + Angular (one template has both)
-🚫 DO NOT re-discover workspace mid-run — reuse cached structure
+🚫 DO NOT copy separate templates for fullstack .NET + Angular
+🚫 DO NOT re-discover workspace mid-run — folder structure is cached
 
 🔚 END OF PROMPT
