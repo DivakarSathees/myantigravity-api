@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from brain import app as agent_app  # Import your LangGraph app
 from langchain_core.messages import HumanMessage, AIMessage
-from typing import Dict, List
+from typing import Dict, List, Optional
 from uuid import uuid4
 
 # Import shared utilities
@@ -25,6 +25,9 @@ import re
 # Session tracking for markdown generation
 session_activities = {}  # session_id -> {files_changed: [], commands_run: [], request: str, response: str}
 current_session_id = None  # Track current active session
+
+# Agent run cancellation: when True for a session_id, the agent stream loop will stop
+agent_cancel_flags: Dict[str, bool] = {}
 
 def get_current_session_id():
     """Get the current active session ID"""
@@ -268,12 +271,24 @@ async def chat(request: ChatRequest):
     }
     config = {"recursion_limit": 150}  # Allow longer agent→tool→agent chains before stopping
     final_response = ""
-    
+    agent_stopped_by_user = False
+
+    # Allow this run to be cancelled via POST /stop-agent
+    agent_cancel_flags[session_id] = False
+
     # Track current task for updates
     current_task_id = await add_progress_task("Processing", "Agent is thinking...")
     tool_count = 0
 
     async for output in agent_app.astream(inputs, config=config):
+        # Check if user requested to stop the agent
+        if agent_cancel_flags.get(session_id):
+            agent_stopped_by_user = True
+            final_response = "⏹️ Agent run stopped by user."
+            await broadcast_log("⏹️ Agent run stopped by user.")
+            await update_progress_task(current_task_id, "cancelled", "Stopped by user")
+            break
+
         for key, value in output.items():
 
             # Stream planner output (task plan)
@@ -371,8 +386,12 @@ async def chat(request: ChatRequest):
                     await update_progress_task(current_task_id, "completed", "Integration validated")
                     current_task_id = await add_progress_task("Final report", "Generating final report...")
 
-    # Mark final task as complete
-    await update_progress_task(current_task_id, "completed", "Done")
+    # Clear cancel flag so next run is not immediately cancelled
+    agent_cancel_flags.pop(session_id, None)
+
+    # Mark final task as complete (unless already updated by stop)
+    if not agent_stopped_by_user:
+        await update_progress_task(current_task_id, "completed", "Done")
     
     # End progress session
     await end_progress_session()
@@ -399,6 +418,27 @@ async def chat(request: ChatRequest):
         "session_title": session["title"],
         "summary_file": summary_path
     }
+
+
+class StopAgentRequest(BaseModel):
+    """Optional session_id to stop; if omitted, stops the current session's agent run."""
+    session_id: str = None
+
+
+@app.post("/stop-agent")
+async def stop_agent(request: Optional[StopAgentRequest] = None):
+    """
+    Request to stop the running agent for the given (or current) session.
+    The agent stream loop checks this flag each iteration and will break out,
+    then return a response indicating the run was stopped by the user.
+    Call with no body to stop current session, or {"session_id": "..."} to stop a specific session.
+    """
+    sid = (request.session_id if request and getattr(request, "session_id", None) else None) or current_session_id
+    if not sid:
+        return {"ok": False, "message": "No session ID and no current session"}
+    agent_cancel_flags[sid] = True
+    await broadcast_log("⏹️ Stop requested for agent run.")
+    return {"ok": True, "message": "Stop requested", "session_id": sid}
 
 
 # @app.websocket("/ws/logs")

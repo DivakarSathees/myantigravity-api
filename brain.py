@@ -340,11 +340,35 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
             if not os.path.exists(path):
                 return f"❌ Error: File '{path}' does not exist"
             
-            # Notify UI about reading
+            # Use cached content if available and file not modified on disk (avoids re-reading)
+            print(f"🔍 Reading: {path}")
+            print(f"🔍 _file_content_cache: {_file_content_cache}")
+            if path in _file_content_cache:
+                try:
+                    current_mtime = os.path.getmtime(path)
+                    cached_mtime = _file_content_cache.get((path, "_mtime"))
+                    if cached_mtime is not None and cached_mtime == current_mtime:
+                        content = _file_content_cache[path]
+                        await broadcast_log(f"✓ Read (cached): {file_name} ({len(content)} chars)")
+                        return content if content else "(File is empty)"
+                except (OSError, TypeError):
+                    pass
+                # Cache stale or missing mtime — remove and re-read below
+                _file_content_cache.pop(path, None)
+                _file_content_cache.pop((path, "_mtime"), None)
+            
+            # Notify UI about reading from disk
             await broadcast_log(f"📖 Reading: {file_name}")
             
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
+            
+            # Store in cache (invalidated when file is written via manage_file or mtime changes)
+            _file_content_cache[path] = content
+            try:
+                _file_content_cache[(path, "_mtime")] = os.path.getmtime(path)
+            except OSError:
+                pass
             
             await broadcast_log(f"✓ Read: {file_name} ({len(content)} chars)")
             
@@ -630,6 +654,9 @@ _review_cache: dict = {}          # path → sha256 hex of last-reviewed content
 REVIEW_MODE = "FAST"              # "FAST" (default) or "STRICT"
 _phase_created_files: set = set()  # files created/modified in the CURRENT phase (reset per phase)
 _workspace_structure_cache: dict = {}  # dir_path → list of entries (avoids repeated list_dir calls)
+# File content cache: path → content. Avoids re-reading the same file (e.g. when writing test cases).
+# Invalidated when the file is written via manage_file so edits always get fresh reads.
+_file_content_cache: dict = {}   # absolute path → file content string
 MAX_PHASE_RETRIES = 3             # max retry attempts per phase for build failures
 
 # Files that should never be reviewed (configs, non-code)
@@ -666,6 +693,9 @@ def _track_modified_file(abs_path: str, content: str):
     # Invalidate workspace structure cache for this file's directory
     parent_dir = os.path.dirname(abs_path)
     _workspace_structure_cache.pop(parent_dir, None)
+    # Invalidate file content cache so next read gets fresh content
+    _file_content_cache.pop(abs_path, None)
+    _file_content_cache.pop((abs_path, "_mtime"), None)
 
 
 def _classify_layer(abs_path: str) -> str:
