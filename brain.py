@@ -49,8 +49,16 @@ async def execute_terminal(command: str):
       .NET Console:  cp -r dotnettemplates/dotnetconsole .
       .NET MVC:      cp -r dotnettemplates/dotnetmvc .
       Angular:       cp -r angularscaffolding .
+      fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
+        (contains dotnetapp/ for backend and angularapp/ for frontend — ONE copy for both)
     For UNKNOWN templates: search templates (list_dir, find_file), copy template via this tool
     (cp -r), then only in the pasted project run version checks and build/test.
+    
+    FULLSTACK .NET + ANGULAR RULES:
+    - The dotnetangularfullstack template has BOTH dotnetapp/ and angularapp/ folders.
+    - Copy ONCE: cp -r dotnettemplates/dotnetangularfullstack .
+    - Backend and frontend work can proceed simultaneously (interleaved) — no need to finish backend before starting frontend.
+    - Do NOT change any port configuration — backend is already on 8080, frontend on 8081 in the template.
     
     CRITICAL RULES:
     1. All execution MUST use this tool (command line only); no other execution path.
@@ -1331,6 +1339,11 @@ For known templates, execute the copy command DIRECTLY — do NOT search or disc
   • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
   • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
   • Angular:       execute_terminal("cp -r angularscaffolding .")
+  • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
+    → This template contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in one folder.
+    → Copy ONCE — do NOT copy separate templates for backend and frontend.
+    → Backend work and frontend work can be done simultaneously (interleaved steps).
+    → Do NOT change any port config — backend: 8080, frontend: 8081 (already set in template).
 After executing the direct copy, skip Step 1 (template analysis) and Step 2 (plan) — go directly to verification and then solution.
 For Angular: after copy, use npx ng g c / npx ng g s to generate components/services BEFORE writing code.
 For UNKNOWN stacks/templates, follow the full discovery workflow below.
@@ -1373,6 +1386,9 @@ IF KNOWN TEMPLATE (.NET or Angular):
     • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
     • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
     • Angular:       execute_terminal("cp -r angularscaffolding .")
+    • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
+      → One copy gives you BOTH dotnetapp/ and angularapp/. Do NOT copy separate templates.
+      → Do NOT change ports. Backend: 8080, Frontend: 8081 (pre-configured).
   → For Angular: after copy, use npx ng g c / npx ng g s to generate components/services.
   → Skip Step 1 discovery — go straight to verification below.
 
@@ -1457,6 +1473,9 @@ FOR KNOWN TEMPLATES — execute directly, NO discovery needed:
   • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
   • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
   • Angular:       execute_terminal("cp -r angularscaffolding .")
+  • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
+    → ONE copy creates BOTH dotnetapp/ (backend) and angularapp/ (frontend).
+    → Do NOT copy two separate templates. Do NOT change ports (backend: 8080, frontend: 8081).
   → After direct copy, skip to Step 2 (verify + work inside copied root).
   → For Angular: generate components/services with npx ng g c / npx ng g s before writing code.
 
@@ -1968,6 +1987,9 @@ For KNOWN templates, execute the copy command DIRECTLY — do NOT search:
   • .NET Console:  cp -r dotnettemplates/dotnetconsole .
   • .NET MVC:      cp -r dotnettemplates/dotnetmvc .
   • Angular:       cp -r angularscaffolding .
+  • fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
+    → ONE copy → both dotnetapp/ (backend) and angularapp/ (frontend).
+    → Do NOT change ports (backend: 8080, frontend: 8081 — pre-configured).
 For UNKNOWN stacks/templates, discover first:
 1. Discover templates: list_dir template/ or list_dir templates/, then list_dir templates/webapi (or template/ado, etc.). Confirm dotnetapp and nunit inside; find nunit/test/TestProject, *.sln, run.sh.
 2. Copy the ROOT only: cp -r templates/webapi .  or  cp -r template/ado ./ado. Do NOT use cp -r templates/webapi/dotnetapp; the destination must be the variant folder (webapi, ado) so that dotnetapp and nunit are inside it.
@@ -2217,7 +2239,10 @@ YOUR RULES:
     Do NOT output long summaries or next-step plans. Just the completion line.
 
 MULTI-SECTION PROJECTS (e.g., full-stack: backend + frontend):
-• Section 1 (Backend) runs all its steps first, then Section 2 (Frontend) starts.
+• For fullstack .NET + Angular: use a SINGLE section — copy ONE template
+  (cp -r dotnettemplates/dotnetangularfullstack .) and work on both dotnetapp/ and angularapp/
+  simultaneously with interleaved steps. Do NOT change ports (backend: 8080, frontend: 8081).
+• For other full-stack combos: Section 1 (Backend) runs first, then Section 2 (Frontend).
 • Context carries forward automatically between sections.
 
 ⚠️ TEST CASES ARE NOT INCLUDED BY DEFAULT:
@@ -2287,7 +2312,8 @@ REMEMBER:
 - For EVERY user prompt: THINK and PLAN first, then execute. Never skip thinking/planning.
 - Understand what user wants → State understanding → State plan (🤔 Thinking, 📋 Plan) → Execute → Report
 - Execute only via execute_terminal for commands; manage_file for read/write
-- For project creation: KNOWN templates → use direct cp commands (.NET: dotnettemplates/*, Angular: angularscaffolding); UNKNOWN templates → discover first then copy ROOT
+- For project creation: KNOWN templates → use direct cp commands (.NET: dotnettemplates/*, Angular: angularscaffolding, fullstack .NET + Angular: dotnettemplates/dotnetangularfullstack with BOTH dotnetapp/ and angularapp/ in ONE copy); UNKNOWN templates → discover first then copy ROOT
+- For fullstack .NET + Angular: ONE template, ONE copy, simultaneous backend+frontend work. Do NOT change ports (backend: 8080, frontend: 8081).
 - Never ask questions; report results
 
 📚 EXAMPLE: COMPLETE EDIT → BUILD → FIX FLOW:
@@ -2477,6 +2503,38 @@ def detect_dotnet_framework(messages) -> str:
         return "webapi"  # default
 
     return max(scores, key=scores.get)
+
+
+def _is_fullstack_dotnet_angular(messages) -> bool:
+    """
+    Detect if the user is asking for a full-stack project with BOTH
+    .NET backend AND Angular frontend. When True, the planner should use
+    the combined dotnetangularfullstack template (single copy, single section).
+    """
+    last_human = ""
+    for msg in reversed(messages):
+        if hasattr(msg, 'type') and msg.type == 'human':
+            last_human = str(msg.content).lower()
+            break
+        elif isinstance(msg, HumanMessage):
+            last_human = str(msg.content).lower()
+            break
+
+    if not last_human:
+        return False
+
+    has_dotnet = any(kw in last_human for kw in [
+        "dotnet", ".net", "webapi", "web api", "asp.net", "csharp", "c#",
+    ])
+    has_angular = any(kw in last_human for kw in [
+        "angular", "ng", "angularapp",
+    ])
+    has_fullstack = any(kw in last_human for kw in [
+        "full stack", "fullstack", "full-stack",
+        "frontend and backend", "backend and frontend",
+    ])
+
+    return has_dotnet and has_angular and has_fullstack
 
 
 # -------------------------------------------------
@@ -2726,9 +2784,12 @@ ANGULAR_RULES = """
 Stack detected: Angular — The following rules are NOW IN EFFECT.
 
 TEMPLATE:
-• KNOWN TEMPLATE: cp -r angularscaffolding .
-  Execute this DIRECTLY — do NOT search or discover templates.
-• After copy, ALL work happens ONLY inside the copied angularscaffolding/ folder.
+• Angular standalone: cp -r angularscaffolding .
+• Fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
+  (contains dotnetapp/ for backend AND angularapp/ for frontend — ONE copy)
+  Execute DIRECTLY — do NOT search or discover templates.
+• For standalone Angular: work inside angularscaffolding/.
+• For fullstack: Angular code is in dotnetangularfullstack/angularapp/.
 
 NODE VERSION:
 • Default node version is 20.
@@ -2739,6 +2800,11 @@ PROJECT STRUCTURE — DO NOT CHANGE:
 • Do NOT modify the existing project structure (tsconfig, angular.json, karma.conf, etc.).
 • Do NOT rename or move existing files.
 • Only ADD new components, services, models, and routing as needed.
+
+PORT CONFIGURATION — NEVER CHANGE:
+• For fullstack projects: backend=8080, frontend=8081 (pre-configured in template).
+• Do NOT modify launchSettings.json, proxy.conf.json, angular.json serve port, or any port config.
+• The template already has correct CORS and proxy settings — do NOT touch them.
 
 COMPONENT & SERVICE GENERATION — MANDATORY COMMANDS:
 • To create a component: execute_terminal("npx ng g c <component-name>")
@@ -4074,6 +4140,8 @@ TEMPLATE_COPY_COMMANDS = {
     "mvc": "cp -r dotnettemplates/dotnetmvc .",
     # Angular
     "angular": "cp -r angularscaffolding .",
+    # fullstack .NET + Angular
+    "dotnetangularfullstack": "cp -r dotnettemplates/dotnetangularfullstack .",
 }
 
 # -------------------------------------------------
@@ -4094,9 +4162,9 @@ PLANNING RULES
 
 1. Break the user request into SECTIONS.
    - Each section is an independently completable unit of work.
-   - For a full-stack app (e.g., dotnet + HTML): Section 1 = Backend, Section 2 = Frontend.
-   - For a backend-only project: just one section.
-   - NEVER mix backend and frontend in the same section.
+   - For a backend-only or frontend-only project: just one section.
+   - For FULLSTACK .NET + ANGULAR: use ONE section (the template has both dotnetapp/ and angularapp/).
+   - For other full-stack combos (e.g., dotnet + plain HTML): Section 1 = Backend, Section 2 = Frontend.
 
 2. Within each section, define STEPS in execution order.
    - Each step is a concrete action the orchestrator should perform.
@@ -4107,6 +4175,8 @@ PLANNING RULES
    - .NET Console: cp -r dotnettemplates/dotnetconsole .
    - .NET MVC: cp -r dotnettemplates/dotnetmvc .
    - Angular: cp -r angularscaffolding .
+   - fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
+     (this contains BOTH dotnetapp/ and angularapp/ — ONE copy for the entire project)
    - For unknown stacks: specify "DISCOVER_TEMPLATE" and the orchestrator will search.
 
 4. Each section MUST follow this flow:
@@ -4126,6 +4196,12 @@ PLANNING RULES
 
 7. Do NOT plan tasks that require user input mid-execution.
 
+8. PORT CONFIGURATION — NEVER CHANGE PORTS:
+   - The fullstack .NET + Angular template has pre-configured ports: backend=8080, frontend=8081.
+   - Do NOT add any steps to modify launchSettings.json, proxy config, or port numbers.
+   - Do NOT change angular.json serve port, proxy.conf.json, or any port-related config.
+   - The template is already wired for backend↔frontend communication.
+
 ========================
 CONTEXT RETENTION RULES
 ========================
@@ -4135,32 +4211,56 @@ CONTEXT RETENTION RULES
 - State "CARRY FORWARD:" at the end of each section with what the next section needs.
 
 ========================
-FULL-STACK PROJECT PLANNING (backend + frontend)
+FULLSTACK .NET + ANGULAR PROJECT PLANNING (SINGLE SECTION)
 ========================
 
-When the user asks for a full-stack project (e.g., "dotnet + angular", "backend and frontend"):
+When the user asks for a full-stack project with .NET backend AND Angular frontend:
 
-SECTION 1 — BACKEND (complete fully first):
-  1. Copy known template (direct command: cp -r dotnettemplates/dotnetwebapi .)
+Use a SINGLE SECTION — the template "dotnetangularfullstack" contains BOTH:
+  - dotnetangularfullstack/dotnetapp/ → backend (.NET Web API)
+  - dotnetangularfullstack/angularapp/ → frontend (Angular)
+
+SECTION 1 — FULL-STACK (backend + frontend interleaved):
+  1. Copy template: cp -r dotnettemplates/dotnetangularfullstack .
+  2. Install Angular deps: cd dotnetangularfullstack/angularapp && npm install
+  3. Generate Angular components: cd dotnetangularfullstack/angularapp && npx ng g c <name>
+  4. Generate Angular services: cd dotnetangularfullstack/angularapp && npx ng g s services/<name>
+  5. Implement backend models (dotnetangularfullstack/dotnetapp/Models/)
+  6. Implement backend controllers (dotnetangularfullstack/dotnetapp/Controllers/)
+  7. Implement Angular service code (HttpClient calls to backend API)
+  8. Implement Angular component .ts/.html/.css files
+  9. Add attractive CSS (global styles + component styles)
+  10. Batch review: scalable_batch_review(mode='FAST')
+  11. Build backend: cd dotnetangularfullstack/dotnetapp && dotnet build
+  12. Build frontend: cd dotnetangularfullstack/angularapp && npx ng build
+
+KEY RULES FOR FULLSTACK .NET + ANGULAR:
+- ONE template copy, ONE section, interleaved steps — do NOT split into 2 sections.
+- Do NOT change any ports — backend: 8080, frontend: 8081 (pre-configured in template).
+- Do NOT modify launchSettings.json, proxy.conf.json, or angular.json port settings.
+- Angular components/services MUST be generated with npx ng g c / npx ng g s.
+- Attractive CSS is MANDATORY for Angular components.
+- The working_directory for backend code is "dotnetangularfullstack/dotnetapp".
+- The working_directory for frontend code is "dotnetangularfullstack/angularapp".
+
+========================
+OTHER FULL-STACK COMBOS (e.g., dotnet + plain HTML)
+========================
+
+When the user asks for a full-stack project that is NOT .NET + Angular:
+
+SECTION 1 — BACKEND:
+  1. Copy known template (e.g., cp -r dotnettemplates/dotnetwebapi .)
   2. Implement all models, services, controllers
   3. Batch review
-  4. Build (dotnet build) and verify
+  4. Build and verify
   → carry_forward: API endpoints, DB schema, project structure, port
 
-SECTION 2 — FRONTEND (uses carry_forward from backend):
-  If Angular:
-    1. Copy template: cp -r angularscaffolding .
-    2. cd angularscaffolding && npm install
-    3. Generate components/services: npx ng g c <name>, npx ng g s services/<name>
-    4. Write solution code into generated files + write tests in .spec.ts files
-    5. Batch review
-    6. Build: npx ng build
-  If plain HTML:
-    1. Create HTML/CSS/JS files
-    2. Batch review
+SECTION 2 — FRONTEND:
+  1. Create HTML/CSS/JS files or copy template
+  2. Implement frontend code
+  3. Batch review
   → Section complete
-
-The orchestrator completes Section 1 entirely before starting Section 2.
 
 ========================
 ANGULAR-ONLY PROJECT PLANNING
@@ -4194,36 +4294,47 @@ OUTPUT FORMAT (STRICT JSON ONLY)
   "dotnet_framework": "webapi" | "console" | "mvc" | null,
   "sections": [
     {
-      "name": "Backend",
-      "description": "ASP.NET Web API with EF Core",
-      "template_command": "cp -r dotnettemplates/dotnetwebapi .",
+      "name": "Section Name",
+      "description": "What this section does",
+      "template_command": "cp -r ... .",
       "working_directory": ".",
       "steps": [
-        {"step": 1, "action": "Copy template", "command": "cp -r dotnettemplates/dotnetwebapi .", "type": "execute"},
-        {"step": 2, "action": "Implement models", "details": "Create Customer.cs, Order.cs in Models/", "type": "code"},
-        {"step": 3, "action": "Implement DbContext", "details": "Create ApplicationDbContext with DbSets", "type": "code"},
-        {"step": 4, "action": "Implement controllers", "details": "Create CustomerController, OrderController", "type": "code"},
-        {"step": 5, "action": "Batch review", "command": "scalable_batch_review(mode='FAST')", "type": "review"},
-        {"step": 6, "action": "Build", "command": "dotnet build", "type": "execute"}
+        {"step": 1, "action": "Copy template", "command": "cp -r ...", "type": "execute"},
+        {"step": 2, "action": "Implement X", "details": "...", "type": "code"}
       ],
-      "carry_forward": ["API endpoints list", "DB schema", "project structure", "port number"]
-    },
+      "carry_forward": []
+    }
+  ],
+  "final_report": true
+}
+
+EXAMPLE — Fullstack .NET + Angular (1 model, 1 controller, 2 endpoints, form + list):
+
+{
+  "project_type": "full-stack",
+  "stack": "dotnet",
+  "dotnet_framework": "webapi",
+  "sections": [
     {
-      "name": "Frontend (Angular)",
-      "description": "Angular app consuming the backend API",
-      "template_command": "cp -r angularscaffolding .",
-      "working_directory": "./angularscaffolding",
+      "name": "Full-Stack (dotnet + angular)",
+      "description": "Complete fullstack app with .NET Web API backend and Angular frontend",
+      "template_command": "cp -r dotnettemplates/dotnetangularfullstack .",
+      "working_directory": ".",
       "steps": [
-        {"step": 1, "action": "Copy Angular template", "command": "cp -r angularscaffolding .", "type": "execute"},
-        {"step": 2, "action": "Install dependencies", "command": "cd angularscaffolding && npm install", "type": "execute"},
-        {"step": 3, "action": "Generate components", "command": "cd angularscaffolding && npx ng g c components/product-list && npx ng g c components/product-form", "type": "execute"},
-        {"step": 4, "action": "Generate services", "command": "cd angularscaffolding && npx ng g s services/product", "type": "execute"},
-        {"step": 5, "action": "Write service code", "details": "Implement ProductService with HttpClient: getProducts(), addProduct()", "type": "code"},
-        {"step": 6, "action": "Write component code", "details": "Implement list and form components using the service", "type": "code"},
-        {"step": 7, "action": "Write test cases in spec files", "details": "Write Karma tests with (as any), fit(), jasmine.createSpyObj", "type": "code"},
-        {"step": 8, "action": "Setup routing and module imports", "details": "Add routes, import HttpClientModule, FormsModule", "type": "code"},
-        {"step": 9, "action": "Batch review", "command": "scalable_batch_review(mode='FAST')", "type": "review"},
-        {"step": 10, "action": "Build", "command": "cd angularscaffolding && npx ng build", "type": "execute"}
+        {"step": 1, "action": "Copy fullstack template", "command": "cp -r dotnettemplates/dotnetangularfullstack .", "type": "execute"},
+        {"step": 2, "action": "Install Angular dependencies", "command": "cd dotnetangularfullstack/angularapp && npm install", "type": "execute"},
+        {"step": 3, "action": "Generate Angular components", "command": "cd dotnetangularfullstack/angularapp && npx ng g c components/product-list && npx ng g c components/product-form", "type": "execute"},
+        {"step": 4, "action": "Generate Angular service", "command": "cd dotnetangularfullstack/angularapp && npx ng g s services/product", "type": "execute"},
+        {"step": 5, "action": "Implement backend model", "details": "Create Models/Product.cs with Id, Name, Price in dotnetangularfullstack/dotnetapp/", "type": "code"},
+        {"step": 6, "action": "Implement backend controller", "details": "Create Controllers/ProductsController.cs with GET and POST using static list in dotnetangularfullstack/dotnetapp/", "type": "code"},
+        {"step": 7, "action": "Implement Angular service", "details": "Write ProductService with HttpClient: getProducts() and addProduct() calling backend API at http://localhost:8080/api/products", "type": "code"},
+        {"step": 8, "action": "Implement product-list component", "details": "Display products in a styled list/card layout", "type": "code"},
+        {"step": 9, "action": "Implement product-form component", "details": "Form with name/price fields, submit calls service", "type": "code"},
+        {"step": 10, "action": "Setup Angular routing and module imports", "details": "Import HttpClientModule, FormsModule, add routes, update app.component.html", "type": "code"},
+        {"step": 11, "action": "Add attractive CSS", "details": "Global styles + component CSS: gradient bg, card shadows, button hover, responsive", "type": "code"},
+        {"step": 12, "action": "Batch review", "command": "scalable_batch_review(mode='FAST')", "type": "review"},
+        {"step": 13, "action": "Build backend", "command": "cd dotnetangularfullstack/dotnetapp && dotnet build", "type": "execute"},
+        {"step": 14, "action": "Build frontend", "command": "cd dotnetangularfullstack/angularapp && npx ng build", "type": "execute"}
       ],
       "carry_forward": []
     }
@@ -4291,8 +4402,26 @@ def task_planner_agent(state: State):
     # Build planner messages
     planner_messages = [SystemMessage(content=PLANNER_SYSTEM_PROMPT)]
 
+    # Check if this is a fullstack dotnet+angular project FIRST
+    is_fullstack_da = _is_fullstack_dotnet_angular(messages)
+
     # Add context about detected stack and framework
-    if stack == "dotnet":
+    if is_fullstack_da:
+        # Fullstack .NET + Angular — single template, single section
+        template_cmd = TEMPLATE_COPY_COMMANDS.get("dotnetangularfullstack",
+                                                   "cp -r dotnettemplates/dotnetangularfullstack .")
+        planner_messages.append(SystemMessage(content=(
+            f"DETECTED: FULLSTACK .NET + ANGULAR PROJECT\n"
+            f"TEMPLATE COPY COMMAND: {template_cmd}\n"
+            f"TEMPLATE STRUCTURE: dotnetangularfullstack/dotnetapp/ (backend) + dotnetangularfullstack/angularapp/ (frontend)\n"
+            f"CRITICAL: Use ONE section only. Copy ONE template. Interleave backend and frontend steps.\n"
+            f"PORTS: backend=8080, frontend=8081 — DO NOT CHANGE ANY PORT CONFIGURATION.\n"
+            f"ANGULAR: generate components with npx ng g c, services with npx ng g s.\n"
+            f"ANGULAR: attractive CSS is MANDATORY. (as any) casting in test files.\n"
+            f"NODE VERSION: 20 (do NOT change Angular version in package.json)\n"
+            f"BUILD: cd dotnetangularfullstack/dotnetapp && dotnet build; cd dotnetangularfullstack/angularapp && npx ng build\n"
+        )))
+    elif stack == "dotnet":
         framework = detect_dotnet_framework(messages)
         template_cmd = TEMPLATE_COPY_COMMANDS.get(framework, "DISCOVER_TEMPLATE")
         planner_messages.append(SystemMessage(content=(

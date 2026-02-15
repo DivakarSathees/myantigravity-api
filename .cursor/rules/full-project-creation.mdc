@@ -15,7 +15,13 @@ For ANY project creation request:
 2. The orchestrator executes each section fully before moving to the next
 3. Each section follows: template copy → solution code → review → build
 
-For FULL-STACK (e.g., dotnet + HTML):
+For FULLSTACK .NET + ANGULAR:
+  Use ONE section (template has both dotnetapp/ and angularapp/).
+  Copy ONCE: cp -r dotnettemplates/dotnetangularfullstack .
+  Work on backend and frontend simultaneously (interleaved steps).
+  Do NOT change ports — backend: 8080, frontend: 8081 (pre-configured).
+
+For other full-stack combos (e.g., dotnet + plain HTML):
   Section 1 = Backend (complete it fully)
   Section 2 = Frontend (complete it fully, using backend context)
 
@@ -50,12 +56,16 @@ For KNOWN templates, execute directly — NO discovery:
   .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
   .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
   Angular:       execute_terminal("cp -r angularscaffolding .")
+  Fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
+    → Contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in ONE folder.
+    → Copy ONCE — do NOT copy separate templates.
+    → Do NOT change ports: backend=8080, frontend=8081 (already configured).
 
 For Angular AFTER copy:
-  cd angularscaffolding && npm install
+  cd <angularapp-folder> && npm install
   Generate components: npx ng g c <component-name>
   Generate services: npx ng g s services/<service-name>
-  Then write solution code + tests in .spec.ts files
+  Then write solution code into generated files
 
 For UNKNOWN templates, discover first:
   list_dir → find template → copy ROOT folder
@@ -75,7 +85,7 @@ STEP 2 — SOLUTION IMPLEMENTATION
 
 STEP 3 — BATCH REVIEW + BUILD VERIFICATION
   Call scalable_batch_review(mode="FAST")
-  Run build command (dotnet build, npm run build, etc.)
+  Run build command (dotnet build, npx ng build, etc.)
   If build FAILS → fix → retry until it passes
 
 STEP 4 — SECTION COMPLETE → NEXT SECTION
@@ -83,31 +93,30 @@ STEP 4 — SECTION COMPLETE → NEXT SECTION
   Carry forward context (endpoints, schema, etc.) to next section
   Immediately continue to next section
 
-📝 FULL-STACK EXAMPLE (dotnet + HTML)
+📝 FULLSTACK .NET + ANGULAR EXAMPLE (single section)
 
-Section 1 — Backend:
-  [Execute: cp -r dotnettemplates/dotnetwebapi .]
-  [Write: Models, Controllers, DbContext, Services]
+Section 1 — Full-Stack:
+  [Execute: cp -r dotnettemplates/dotnetangularfullstack .]
+  [Execute: cd dotnetangularfullstack/angularapp && npm install]
+  [Execute: npx ng g c components/product-list && npx ng g c components/product-form]
+  [Execute: npx ng g s services/product]
+  [Write: Backend models in dotnetangularfullstack/dotnetapp/Models/]
+  [Write: Backend controllers in dotnetangularfullstack/dotnetapp/Controllers/]
+  [Write: Angular service code, component code, routing, CSS]
   [Review: scalable_batch_review]
-  [Build: dotnet build → pass]
-  carry_forward: API endpoints, DB schema, port
-
-Section 2 — Frontend:
-  [Write: HTML pages with forms/tables for each API endpoint]
-  [Write: CSS styles]
-  [Write: JS with fetch() to backend endpoints from carry_forward]
-  [Review: scalable_batch_review]
-  → Section complete
+  [Build: cd dotnetangularfullstack/dotnetapp && dotnet build]
+  [Build: cd dotnetangularfullstack/angularapp && npx ng build]
 
 Final Report:
-  List what was built per section, how to run
+  List what was built, how to run
 
 ❗ RULES
 
 🚫 DO NOT add test cases unless user explicitly asks
 🚫 DO NOT add description generation unless user explicitly asks
 🚫 DO NOT stop between sections
-🚫 DO NOT interleave sections — finish one before starting the next
+🚫 DO NOT change port configuration (backend: 8080, frontend: 8081)
+🚫 DO NOT copy separate templates for fullstack .NET + Angular (one template has both)
 🚫 DO NOT re-discover workspace mid-run — reuse cached structure
 
 🔚 END OF PROMPT
