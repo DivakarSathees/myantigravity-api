@@ -150,10 +150,23 @@ async def execute_terminal(command: str):
             except Exception:
                 break
     
-    # Run both simultaneously
+    # Run with timeout so long-running/hung commands (e.g. dotnet test) don't block forever
+    COMMAND_TIMEOUT = 600  # 10 minutes
+    timed_out = False
     try:
-        await asyncio.gather(read_stdout(), read_stderr())
-        await process.wait()
+        async def run_until_done():
+            await asyncio.gather(read_stdout(), read_stderr())
+            await process.wait()
+        await asyncio.wait_for(run_until_done(), timeout=COMMAND_TIMEOUT)
+    except asyncio.TimeoutError:
+        timed_out = True
+        if process.returncode is None:
+            process.kill()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                pass
+        await broadcast_log(f"⏱️ Command timed out after {COMMAND_TIMEOUT}s and was stopped: {command}")
     except Exception as e:
         await broadcast_log(f"⚠️ Process error: {e}")
     
@@ -165,7 +178,7 @@ async def execute_terminal(command: str):
     await broadcast_process_event("end", process_id, command)
     
     # Prepare result
-    exit_code = process.returncode if process.returncode is not None else -1
+    exit_code = process.returncode if process.returncode is not None else (-9 if timed_out else -1)
     result = {
         "stdout": "\n".join(stdout_lines) if stdout_lines else "",
         "stderr": "\n".join(stderr_lines) if stderr_lines else "",
@@ -187,6 +200,13 @@ async def execute_terminal(command: str):
             return f"Command executed successfully.\nOutput:\n{result['stdout']}"
         else:
             return "Command executed successfully (no output produced)."
+    elif timed_out or exit_code == -9:
+        err = f"Command timed out after {COMMAND_TIMEOUT}s and was stopped.\n"
+        if result["stdout"]:
+            err += f"Output so far:\n{result['stdout']}\n"
+        if result["stderr"]:
+            err += f"Stderr:\n{result['stderr']}"
+        return err
     elif exit_code == -15 or exit_code == 130:  # SIGTERM or SIGINT
         await broadcast_log(f"🛑 Command was terminated: {command}")
         return "Command was terminated by user."
@@ -294,8 +314,9 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 except Exception:
                     pass
                 
-                # Track for scalable batch review
+                # Track for scalable batch review and update file content cache
                 _track_modified_file(path, content)
+                _update_file_content_cache(path, content)
                 
                 return f"✅ File updated: {path}\n\n📝 Changes applied! You can view diff or revert in the sidebar.\n\nDiff preview:\n{diff_text[:500]}{'...' if len(diff_text) > 500 else ''}"
             
@@ -330,8 +351,9 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 except Exception:
                     pass
                 
-                # Track for scalable batch review
+                # Track for scalable batch review and store new file in content cache
                 _track_modified_file(path, content)
+                _update_file_content_cache(path, content)
                 
                 preview = content[:300] + ("..." if len(content) > 300 else "")
                 return f"✅ File created: {path}\n\n📝 New file created! You can view or delete in the sidebar.\n\nPreview:\n{preview}"
@@ -341,8 +363,7 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 return f"❌ Error: File '{path}' does not exist"
             
             # Use cached content if available and file not modified on disk (avoids re-reading)
-            print(f"🔍 Reading: {path}")
-            print(f"🔍 _file_content_cache: {_file_content_cache}")
+            # If the user (or anyone) edited the file, mtime will differ and we re-read from disk
             if path in _file_content_cache:
                 try:
                     current_mtime = os.path.getmtime(path)
@@ -654,9 +675,12 @@ _review_cache: dict = {}          # path → sha256 hex of last-reviewed content
 REVIEW_MODE = "FAST"              # "FAST" (default) or "STRICT"
 _phase_created_files: set = set()  # files created/modified in the CURRENT phase (reset per phase)
 _workspace_structure_cache: dict = {}  # dir_path → list of entries (avoids repeated list_dir calls)
-# File content cache: path → content. Avoids re-reading the same file (e.g. when writing test cases).
-# Invalidated when the file is written via manage_file so edits always get fresh reads.
-_file_content_cache: dict = {}   # absolute path → file content string
+# File content cache: path → content (and (path, "_mtime") → mtime for change detection).
+# - When we create or write a file, we store its content and mtime here (session-long).
+# - On read: if cache has the path and mtime matches the file's current mtime, return cache.
+# - If the user (or anything else) edits the file, the file's mtime changes; we then re-read
+#   from disk and update the cache. So we "know" a file was edited by comparing mtime.
+_file_content_cache: dict = {}   # absolute path → content; (path, "_mtime") → float
 MAX_PHASE_RETRIES = 3             # max retry attempts per phase for build failures
 
 # Files that should never be reviewed (configs, non-code)
@@ -685,17 +709,26 @@ _LAYER_PATTERNS = {
 
 
 def _track_modified_file(abs_path: str, content: str):
-    """Called by manage_file after every write. Only tracks the path as modified.
-    Does NOT update _review_cache — that happens AFTER the review completes,
-    so newly created/updated files are never skipped as 'unchanged'."""
+    """Called by manage_file after every write. Tracks the path for review and
+    invalidates workspace structure cache. File content cache is updated by
+    _update_file_content_cache (called from manage_file) so created/edited
+    files are stored in cache until the file is changed again (e.g. by user)."""
     _modified_files.add(abs_path)
     _phase_created_files.add(abs_path)
     # Invalidate workspace structure cache for this file's directory
     parent_dir = os.path.dirname(abs_path)
     _workspace_structure_cache.pop(parent_dir, None)
-    # Invalidate file content cache so next read gets fresh content
-    _file_content_cache.pop(abs_path, None)
-    _file_content_cache.pop((abs_path, "_mtime"), None)
+
+
+def _update_file_content_cache(abs_path: str, content: str):
+    """Store file content in cache after we create or write a file. Next read
+    will use this until the file is modified (e.g. user edits in IDE); then
+    we detect the change via mtime and re-read from disk."""
+    _file_content_cache[abs_path] = content
+    try:
+        _file_content_cache[(abs_path, "_mtime")] = os.path.getmtime(abs_path)
+    except OSError:
+        pass
 
 
 def _classify_layer(abs_path: str) -> str:
