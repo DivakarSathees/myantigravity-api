@@ -297,6 +297,7 @@ async def chat(request: ChatRequest):
     async def run_agent():
         nonlocal final_response, agent_stopped_by_user, current_task_id, tool_count
         producer = asyncio.create_task(_stream_producer())
+        print(f"🔥 Producer: {producer}")
         try:
             while True:
                 try:
