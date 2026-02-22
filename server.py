@@ -12,7 +12,7 @@ from uuid import uuid4
 # Import shared utilities
 from utils import (
     broadcast_log, connected_clients, pending_changes, broadcast_file_change, 
-    process_file_change_queue, set_workspace_path, running_processes,
+    process_file_change_queue, set_workspace_path, set_current_request_message, running_processes,
     start_progress_session, end_progress_session, add_progress_task, update_progress_task,
     # New applied changes system
     applied_changes, session_changes, process_applied_change_queue, 
@@ -260,6 +260,9 @@ async def chat(request: ChatRequest):
     
     await update_progress_task(analyze_task, "completed", "Request analyzed")
     
+    # Set current request message so tools (e.g. execute_terminal) can block template copy when user asked to write test cases
+    set_current_request_message(request.message)
+
     # Create inputs with full conversation history and recursion limit
     inputs = {
         "messages": session["messages"].copy(),
@@ -423,6 +426,8 @@ async def chat(request: ChatRequest):
                 await producer
             except asyncio.CancelledError:
                 pass
+            # Clear request context so next run does not use this request's message
+            set_current_request_message("")
 
         # Clear cancel flag so next run is not immediately cancelled
         agent_cancel_flags.pop(session_id, None)

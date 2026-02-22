@@ -48,7 +48,7 @@ async def execute_terminal(command: str):
       .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
       .NET Console:  cp -r dotnettemplates/dotnetconsole .
       .NET MVC:      cp -r dotnettemplates/dotnetmvc .
-      Angular:       cp -r angularscaffolding .
+      Angular:       cp -r dotnettemplates/angularscaffolding .
       fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
         (contains dotnetapp/ for backend and angularapp/ for frontend — ONE copy for both)
     For UNKNOWN templates: search templates (list_dir, find_file), copy template via this tool
@@ -75,9 +75,39 @@ async def execute_terminal(command: str):
     # Get workspace path from VS Code
     workspace_path = get_workspace_path()
 
+    # ── BLOCK TEMPLATE COPY WHEN USER ASKED TO WRITE TEST CASES ──
+    stripped_cmd = command.strip()
+    is_template_copy = (
+        ("cp -r" in stripped_cmd or " cp " in stripped_cmd)
+        and (
+            "dotnettemplates" in stripped_cmd
+            or "templates/" in stripped_cmd
+            or "dotnettemplates/angularscaffolding" in stripped_cmd
+        )
+    )
+    if is_template_copy:
+        try:
+            from utils import get_current_request_message
+            msg = (get_current_request_message() or "").lower()
+            write_test_phrases = [
+                "write testcase",
+                "write test cases",
+                "add tests",
+                "generate tests",
+                "write testcases",
+            ]
+            if any(phrase in msg for phrase in write_test_phrases):
+                await broadcast_log("⛔ Blocked: template copy is not allowed when the user asked to write test cases. The project already exists in the workspace.")
+                return (
+                    "⛔ Blocked: You must NOT copy a template when the user asked to write test cases. "
+                    "The project is already in the workspace. Use list_dir to find the existing project and test folders, "
+                    "then read existing test files and write new tests there. Do not run cp -r dotnettemplates/... or cp -r templates/... ."
+                )
+        except Exception:
+            pass
+
     # ── NPM INSTALL OPTIMIZATION ──
     # Skip npm install if node_modules already exists in the target directory
-    stripped_cmd = command.strip()
     if "npm install" in stripped_cmd or "npm i" in stripped_cmd:
         # Extract the working directory from `cd <dir> && npm install` pattern
         npm_dir = workspace_path
@@ -265,6 +295,19 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
         if action == "write":
             if content is None:
                 return "Error: content parameter is required for write action"
+
+            # Block writes to template folders (read-only) — do not edit or write solution/tests inside them
+            norm_workspace = os.path.normpath(workspace_path)
+            norm_path = os.path.normpath(path)
+            try:
+                rel = os.path.relpath(norm_path, norm_workspace)
+                if not rel.startswith("..") and not os.path.isabs(rel):
+                    first_part = rel.split(os.sep)[0] if os.sep in rel else rel
+                    if first_part in ("dotnettemplates", "templates", "template", "dotnettemplates/angularscaffolding"):
+                        return ("Error: Writing to the template folder is not allowed. Template folders (dotnettemplates/, templates/, template/, dotnettemplates/angularscaffolding/) are read-only. "
+                                "Do not edit or write solution/test files inside the template. Write only to the COPIED project in the workspace (e.g. ./dotnetwebapi/, ./webapi/, ./dotnetconsole/).")
+            except ValueError:
+                pass
             
             # Check if file exists to determine if it's an edit or new file
             file_exists = os.path.exists(path)
@@ -1451,7 +1494,7 @@ EXCEPTION — WRITE TEST CASES FOR EXISTING PROJECT (NO TEMPLATE COPY):
 When the user asks to "write test cases", "write testcases for this project", "add tests", or "generate tests" for the current/existing project, the project is ALREADY in the workspace.
 
 FORBIDDEN — NEVER DO THIS WHEN USER ASKED TO WRITE TEST CASES:
-- Do NOT run execute_terminal with any command that copies from a template folder. Forbidden commands include: cp -r dotnettemplates/..., cp -r templates/..., cp -r dotnettemplates/dotnetcollections ., cp -r dotnettemplates/dotnetwebapi ., cp -r dotnettemplates/dotnetconsole ., cp -r angularscaffolding ., or any similar cp/copy from template or dotnettemplates or templates.
+- Do NOT run execute_terminal with any command that copies from a template folder. Forbidden commands include: cp -r dotnettemplates/..., cp -r templates/..., cp -r dotnettemplates/dotnetcollections ., cp -r dotnettemplates/dotnetwebapi ., cp -r dotnettemplates/dotnetconsole ., cp -r dotnettemplates/angularscaffolding ., or any similar cp/copy from template or dotnettemplates or templates.
 - Copying a template into the workspace OVERWRITES the user's existing project folder and DESTROYS their code. The user already has the project (e.g. dotnetcollections or similar) in the workspace; you must ONLY add or edit test files inside that existing folder. If you run cp -r dotnettemplates/something ., you will replace the user's project with a fresh template and lose all their work.
 
 Allowed when user asked to write test cases: list_dir, manage_file (read/write), find_file, execute_terminal for dotnet test / dotnet build only (not cp). Do NOT use execute_terminal to copy any template.
@@ -1467,7 +1510,7 @@ For known templates, execute the copy command DIRECTLY — do NOT search or disc
   • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
   • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
   • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
-  • Angular:       execute_terminal("cp -r angularscaffolding .")
+  • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
   • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → This template contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in one folder.
     → Copy ONCE — do NOT copy separate templates for backend and frontend.
@@ -1477,13 +1520,14 @@ After executing the direct copy, skip Step 1 (template analysis) and Step 2 (pla
 For Angular: after copy, use npx ng g c / npx ng g s to generate components/services BEFORE writing code.
 For UNKNOWN stacks/templates, follow the full discovery workflow below.
 
-1. TEMPLATE FOLDER IS READ-ONLY
-- The template folder (template/ or templates/) is EXECUTABLE and IMMUTABLE.
-- You MUST NOT modify, delete, rename, or edit anything inside the template folder.
+1. TEMPLATE FOLDER IS READ-ONLY — NEVER EDIT OR WRITE INSIDE IT
+- The template folder is EXECUTABLE and IMMUTABLE. You must NEVER edit, modify, delete, rename, or WRITE any files inside the template folder.
+- Template folder names: dotnettemplates/, templates/, template/, dotnettemplates/angularscaffolding/. These are READ-ONLY. Do not write solution code or test cases inside them. Do not edit any file under these paths.
+- All solution and test code MUST be written ONLY inside the COPIED project (the folder you pasted into the workspace, e.g. ./dotnetwebapi/, ./webapi/, ./dotnetconsole/, ./dotnetcollections/). The manage_file tool will reject writes to paths under dotnettemplates/, templates/, template/, or dotnettemplates/angularscaffolding/.
 - For UNKNOWN templates: FIRST action is copy the required template AS-IS into the workspace (e.g. cp -r templates/webapi .).
-- Copy from: template/<template-name>/ or templates/<template-name>/
+- Copy from: template/<template-name>/ or templates/<template-name>/ or dotnettemplates/<name>/
 - Paste into: workspace/<template-name>/ (e.g. ./webapi or ./myproject)
-- All work MUST happen ONLY inside the copied folder. NEVER reference or write outside it.
+- All work MUST happen ONLY inside the copied folder. NEVER write or edit inside the template folder itself.
 
 2. COPIED FOLDER IS EXECUTABLE-ONLY (no config/edit of project files)
 - Inside the copied folder, you MUST NOT modify:
@@ -1496,6 +1540,7 @@ For UNKNOWN stacks/templates, follow the full discovery workflow below.
 3. STRICT DIRECTORY BOUNDARY
 - Do NOT access parent directories or create files outside the copied template root.
 - Treat the copied template root as a sandbox.
+- Do NOT write or edit any file whose path is under dotnettemplates/, templates/, template/, or dotnettemplates/angularscaffolding/ — those are template folders and are read-only. Solution and test files go only in the copied project (e.g. ./dotnetwebapi/, ./webapi/).
 
 TEMPLATE STRUCTURE (discover with list_dir; any project type – names vary):
 
@@ -1514,7 +1559,7 @@ IF KNOWN TEMPLATE (.NET or Angular):
     • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
     • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
     • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
-    • Angular:       execute_terminal("cp -r angularscaffolding .")
+    • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
     • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
       → One copy gives you BOTH dotnetapp/ and angularapp/. Do NOT copy separate templates.
       → Do NOT change ports. Backend: 8080, Frontend: 8081 (pre-configured).
@@ -1601,7 +1646,7 @@ FOR KNOWN TEMPLATES — execute directly, NO discovery needed:
   • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
   • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
   • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
-  • Angular:       execute_terminal("cp -r angularscaffolding .")
+  • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
   • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → ONE copy creates BOTH dotnetapp/ (backend) and angularapp/ (frontend).
     → Do NOT copy two separate templates. Do NOT change ports (backend: 8080, frontend: 8081).
@@ -1686,6 +1731,9 @@ STEP 4 – WRITE TESTS IN MATCHING FORMAT
   - Indentation and code formatting
 • Mirror the folder structure of the source code in the test directory
 • Include the same types of tests (unit, integration, edge cases) as existing test files
+
+STEP 5 – CREATE testcase_weightage.json WITH EXACT TEST NAMES
+• Create testcase_weightage.json in the test directory. Each "name" in the JSON MUST exactly match the test case name as written in the test file(s): NUnit = C# method name; pytest = test function name; Jest = it()/test() description string. List every test from the file(s) you created and use those exact names; weightages must sum to 1.0. No extra entries, no missing entries, no name mismatches.
 
 EXAMPLE WORKFLOW:
 
@@ -2122,7 +2170,7 @@ For KNOWN templates, execute the copy command DIRECTLY — do NOT search:
   • .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
   • .NET Console:  cp -r dotnettemplates/dotnetconsole .
   • .NET MVC:      cp -r dotnettemplates/dotnetmvc .
-  • Angular:       cp -r angularscaffolding .
+  • Angular:       cp -r dotnettemplates/angularscaffolding .
   • fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
     → ONE copy → both dotnetapp/ (backend) and angularapp/ (frontend).
     → Do NOT change ports (backend: 8080, frontend: 8081 — pre-configured).
@@ -2323,6 +2371,13 @@ Example (C# / NUnit) — CORRECT:
 After writing all test cases, create a JSON file named `testcase_weightage.json` in the test directory.
 Each test case MUST have a name and weightage. All weightages MUST sum to 1.0.
 
+CRITICAL — NAMES MUST EXACTLY MATCH THE CREATED TEST CASES:
+- The "name" value for each entry in testcase_weightage.json MUST exactly match the test case name as it appears in the test code you wrote. Do not use different spelling, casing, or format.
+- .NET/NUnit: use the exact C# method name (e.g. if the method is `public void FileExistence_BookModelExists()`, the JSON name must be "FileExistence_BookModelExists").
+- Python/pytest: use the exact test function name (e.g. if the function is `def test_create_book_returns_created():`, the JSON name must be "test_create_book_returns_created").
+- JavaScript/Jest: use the exact string passed to it() or test() (e.g. if the test is `it('creates book and returns 201', ...)`, the JSON name must be "creates book and returns 201").
+- Before writing testcase_weightage.json: list every test method/function name from the test file(s) you created, then create one JSON entry per test with that exact name. No extra entries, no missing entries, no name mismatches.
+
 Format:
 [
   {
@@ -2363,6 +2418,7 @@ Weightage distribution guidelines:
 • negative tests: ~8% each (medium-high weight, error handling is critical)
 • boundary tests: ~5% each (medium weight)
 • ALL weightages MUST sum to exactly 1.0
+• Every "name" in the JSON MUST exactly match a test case name in the test file(s) you created (same string as the test method/function name or it() description). One entry per test; no mismatches.
 
 ====================
 📋 PHASE-BASED TASK EXECUTION
@@ -2467,7 +2523,7 @@ REMEMBER:
 - For EVERY user prompt: THINK and PLAN first, then execute. Never skip thinking/planning.
 - Understand what user wants → State understanding → State plan (🤔 Thinking, 📋 Plan) → Execute → Report
 - Execute only via execute_terminal for commands; manage_file for read/write
-- For project creation: KNOWN templates → use direct cp commands (.NET: dotnettemplates/*, Angular: angularscaffolding, fullstack .NET + Angular: dotnettemplates/dotnetangularfullstack with BOTH dotnetapp/ and angularapp/ in ONE copy); UNKNOWN templates → discover first then copy ROOT
+- For project creation: KNOWN templates → use direct cp commands (.NET: dotnettemplates/*, Angular: dotnettemplates/angularscaffolding, fullstack .NET + Angular: dotnettemplates/dotnetangularfullstack with BOTH dotnetapp/ and angularapp/ in ONE copy); UNKNOWN templates → discover first then copy ROOT
 - For fullstack .NET + Angular: ONE template, ONE copy, simultaneous backend+frontend work. Do NOT change ports (backend: 8080, frontend: 8081).
 - Never ask questions; report results
 
@@ -2565,7 +2621,7 @@ _STACK_KEYWORDS = {
     "angular": [
         "angular", "ng", "angularapp", "karma", "jasmine",
         "angular cli", "ng serve", "ng build", "ng generate",
-        "angularscaffolding", "spec.ts",
+        "dotnettemplates/angularscaffolding", "spec.ts",
     ],
     "react": [
         "react", "vite", "jsx", "tsx", "next.js", "nextjs",
@@ -2939,11 +2995,12 @@ ANGULAR_RULES = """
 Stack detected: Angular — The following rules are NOW IN EFFECT.
 
 TEMPLATE:
-• Angular standalone: cp -r angularscaffolding .
-• Fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
+# Angular template copy command
+TEMPLATE_COPY_COMMANDS["angular"] = "cp -r dotnettemplates/angularscaffolding ."
+
   (contains dotnetapp/ for backend AND angularapp/ for frontend — ONE copy)
   Execute DIRECTLY — do NOT search or discover templates.
-• For standalone Angular: work inside angularscaffolding/.
+• For standalone Angular: work inside dotnettemplates/angularscaffolding/.
 • For fullstack: Angular code is in dotnetangularfullstack/angularapp/.
 
 NODE VERSION:
@@ -2999,8 +3056,8 @@ BUILD:
 • Fix any TypeScript compilation errors before proceeding.
 
 EXECUTION ORDER:
-1. Copy template: cp -r angularscaffolding .
-2. Navigate into template: cd angularscaffolding
+1. Copy template: cp -r dotnettemplates/angularscaffolding .
+2. Navigate into template: cd dotnettemplates/angularscaffolding
 3. npm install (first time only)
 4. Generate components/services with npx ng g c / npx ng g s
 5. Write solution code into generated files
@@ -4293,9 +4350,9 @@ TEMPLATE_COPY_COMMANDS = {
     "webapi": "cp -r dotnettemplates/dotnetwebapi .",
     "console": "cp -r dotnettemplates/dotnetconsole .",
     "mvc": "cp -r dotnettemplates/dotnetmvc .",
-    # Angular
-    "angular": "cp -r angularscaffolding .",
-    # fullstack .NET + Angular
+    # Angular template copy command
+    "angular": "cp -r dotnettemplates/angularscaffolding .",
+    # fullstack .NET + Angular template copy command
     "dotnetangularfullstack": "cp -r dotnettemplates/dotnetangularfullstack .",
 }
 
@@ -4345,7 +4402,7 @@ PLANNING RULES
    - .NET Web API: cp -r dotnettemplates/dotnetwebapi .
    - .NET Console: cp -r dotnettemplates/dotnetconsole .
    - .NET MVC: cp -r dotnettemplates/dotnetmvc .
-   - Angular: cp -r angularscaffolding .
+   - Angular: cp -r dotnettemplates/angularscaffolding .
    - fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
      (contains BOTH dotnetapp/ and angularapp/ — ONE copy for the entire project)
    - For unknown stacks: specify "DISCOVER_TEMPLATE" and the orchestrator will search.
@@ -4574,7 +4631,7 @@ def planner_node(state: State):
             f"TEMPLATE COPY COMMAND: {template_cmd}\n"
         )))
     elif stack == "angular":
-        template_cmd = TEMPLATE_COPY_COMMANDS.get("angular", "cp -r angularscaffolding .")
+        template_cmd = TEMPLATE_COPY_COMMANDS.get("angular", "cp -r dotnettemplates/angularscaffolding .")
         planner_messages.append(SystemMessage(content=(
             f"DETECTED STACK: angular\n"
             f"TEMPLATE COPY COMMAND: {template_cmd}\n"

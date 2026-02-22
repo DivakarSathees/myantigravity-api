@@ -21,6 +21,9 @@ session_changes: list = []
 # Current workspace path from VS Code (set by server.py, used by brain.py)
 current_workspace_path: str = None
 
+# Current user request message (set by server.py before agent run, used by brain.py execute_terminal to block template copy when user asked to write test cases)
+current_request_message: str = None
+
 # Track running processes for interactive input and kill support
 running_processes: Dict[str, dict] = {}
 
@@ -37,6 +40,15 @@ def set_workspace_path(path: str):
 def get_workspace_path() -> str:
     """Get the current workspace path"""
     return current_workspace_path
+
+def set_current_request_message(message: str):
+    """Set the current user request message (used to block template copy when user asked to write test cases)."""
+    global current_request_message
+    current_request_message = message or ""
+
+def get_current_request_message() -> str:
+    """Get the current user request message, or empty string if not set."""
+    return current_request_message or ""
 
 async def broadcast_log(message: str):
     """Broadcast a log message to all connected WebSocket clients."""
