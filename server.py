@@ -21,8 +21,17 @@ from utils import (
 import os
 import signal
 import time
+import logging
 from datetime import datetime
 import re
+
+# Debug logging for agent steps (set level to logging.DEBUG for verbose)
+logger = logging.getLogger("agent")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 # Session tracking for markdown generation
 session_activities = {}  # session_id -> {files_changed: [], commands_run: [], request: str, response: str}
@@ -212,11 +221,15 @@ class ChatRequest(BaseModel):
 async def chat(request: ChatRequest):
     global current_session_id
     
+    logger.info("[STEP 1] Chat request received: message=%s ... workspace=%s scope_path=%s",
+                (request.message or "")[:80], getattr(request, "workspace_path", ""), getattr(request, "scope_path", ""))
+    
     # Get or create session
     session_id, session = get_or_create_session(request.session_id)
     
     # Set current session ID for tracking
     current_session_id = session_id
+    logger.info("[STEP 2] Session ready: session_id=%s", session_id)
     
     # Scaffolding: use workspace root so agent can read templates; target folder is scope_path
     message_to_store = request.message
@@ -238,6 +251,7 @@ async def chat(request: ChatRequest):
         effective_workspace = request.scope_path or request.workspace_path
         if effective_workspace:
             set_workspace_path(effective_workspace)
+            logger.info("[STEP 3] Workspace set: effective_workspace=%s", effective_workspace)
             if request.scope_path:
                 await broadcast_log(f"📁 Working in selected folder: {request.scope_path}")
             else:
@@ -262,6 +276,7 @@ async def chat(request: ChatRequest):
     
     # Set current request message so tools (e.g. execute_terminal) can block template copy when user asked to write test cases
     set_current_request_message(request.message)
+    logger.info("[STEP 4] Request context set: message_preview=%s", (request.message or "")[:60])
 
     # Create inputs with full conversation history and recursion limit
     inputs = {
@@ -290,9 +305,11 @@ async def chat(request: ChatRequest):
 
     async def _stream_producer():
         try:
+            logger.info("[STEP 5] Agent stream started (astream)")
             async for output in agent_app.astream(inputs, config=config):
                 await agent_stream_queue.put(("chunk", output))
         except Exception as e:
+            logger.exception("[STEP] Agent stream error: %s", e)
             await agent_stream_queue.put(("error", e))
         finally:
             await agent_stream_queue.put(("done", None))
@@ -375,6 +392,7 @@ async def chat(request: ChatRequest):
                                 tool_result = str(last_msg.content)[:100]
                         
                         await update_progress_task(current_task_id, "completed", f"Completed: {tool_name}")
+                        logger.info("[STEP 6] Tool executed: tool=%s result_preview=%s", tool_name, (tool_result or "")[:80])
                         
                         # Create new task for next action
                         if "execute_terminal" in str(tool_name):
@@ -428,6 +446,7 @@ async def chat(request: ChatRequest):
                 pass
             # Clear request context so next run does not use this request's message
             set_current_request_message("")
+            logger.info("[STEP 7] Agent run finished; request context cleared")
 
         # Clear cancel flag so next run is not immediately cancelled
         agent_cancel_flags.pop(session_id, None)

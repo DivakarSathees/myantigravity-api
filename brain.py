@@ -1,9 +1,14 @@
 import os
 import subprocess
 import asyncio
+import logging
 from typing import Annotated, TypedDict, List
 
 from langchain_openai import AzureChatOpenAI
+
+# Debug logging for tool steps
+logger = logging.getLogger("agent")
+
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, START, END
@@ -77,12 +82,13 @@ async def execute_terminal(command: str):
 
     # ── BLOCK TEMPLATE COPY WHEN USER ASKED TO WRITE TEST CASES ──
     stripped_cmd = command.strip()
+    logger.info("[execute_terminal] Step 1: command=%s", stripped_cmd[:100] if len(stripped_cmd) > 100 else stripped_cmd)
     is_template_copy = (
         ("cp -r" in stripped_cmd or " cp " in stripped_cmd)
         and (
             "dotnettemplates" in stripped_cmd
             or "templates/" in stripped_cmd
-            or "dotnettemplates/angularscaffolding" in stripped_cmd
+            or "angularscaffolding" in stripped_cmd
         )
     )
     if is_template_copy:
@@ -97,14 +103,16 @@ async def execute_terminal(command: str):
                 "write testcases",
             ]
             if any(phrase in msg for phrase in write_test_phrases):
+                logger.info("[execute_terminal] Step 2: BLOCKED template copy (user asked to write test cases); request_preview=%s", msg[:50])
                 await broadcast_log("⛔ Blocked: template copy is not allowed when the user asked to write test cases. The project already exists in the workspace.")
                 return (
                     "⛔ Blocked: You must NOT copy a template when the user asked to write test cases. "
                     "The project is already in the workspace. Use list_dir to find the existing project and test folders, "
                     "then read existing test files and write new tests there. Do not run cp -r dotnettemplates/... or cp -r templates/... ."
                 )
-        except Exception:
-            pass
+            logger.info("[execute_terminal] Step 2: template copy allowed (request not write-test-cases)")
+        except Exception as e:
+            logger.debug("[execute_terminal] Step 2: template check exception: %s", e)
 
     # ── NPM INSTALL OPTIMIZATION ──
     # Skip npm install if node_modules already exists in the target directory
@@ -123,9 +131,11 @@ async def execute_terminal(command: str):
                         npm_dir = os.path.join(workspace_path, cd_target)
         node_modules_path = os.path.join(npm_dir, "node_modules")
         if os.path.isdir(node_modules_path):
+            logger.info("[execute_terminal] Step 3: npm install SKIPPED (node_modules exists)")
             await broadcast_log(f"⏭️ npm install SKIPPED — node_modules already exists in {npm_dir}")
             return f"✅ npm install skipped (node_modules already exists in {npm_dir})"
 
+    logger.info("[execute_terminal] Step 4: running command in workspace=%s", workspace_path)
     await broadcast_log(f"▶️ Executing: {command}")
     await broadcast_log(f"📂 In directory: {workspace_path}")
     await broadcast_log(f"🆔 Process ID: {process_id}")
@@ -214,6 +224,7 @@ async def execute_terminal(command: str):
         "stderr": "\n".join(stderr_lines) if stderr_lines else "",
         "exit_code": exit_code
     }
+    logger.info("[execute_terminal] Step 5: command finished exit_code=%s", exit_code)
     
     # Track command execution for summary
     try:
@@ -283,6 +294,7 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
     
     Returns: Success message for write, file contents for read, or error message
     """
+    logger.info("[manage_file] Step 1: path=%s action=%s", path, action)
     try:
         # Resolve path relative to workspace
         workspace_path = get_workspace_path()
@@ -291,6 +303,7 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
             path = os.path.join(workspace_path, path)
         
         file_name = os.path.basename(path)
+        logger.info("[manage_file] Step 2: resolved path=%s", path)
         
         if action == "write":
             if content is None:
@@ -303,8 +316,9 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 rel = os.path.relpath(norm_path, norm_workspace)
                 if not rel.startswith("..") and not os.path.isabs(rel):
                     first_part = rel.split(os.sep)[0] if os.sep in rel else rel
-                    if first_part in ("dotnettemplates", "templates", "template", "dotnettemplates/angularscaffolding"):
-                        return ("Error: Writing to the template folder is not allowed. Template folders (dotnettemplates/, templates/, template/, dotnettemplates/angularscaffolding/) are read-only. "
+                    if first_part in ("dotnettemplates", "templates", "template", "angularscaffolding"):
+                        logger.info("[manage_file] Step 3: BLOCKED write to template folder: first_part=%s", first_part)
+                        return ("Error: Writing to the template folder is not allowed. Template folders (dotnettemplates/, templates/, template/, angularscaffolding/) are read-only. "
                                 "Do not edit or write solution/test files inside the template. Write only to the COPIED project in the workspace (e.g. ./dotnetwebapi/, ./webapi/, ./dotnetconsole/).")
             except ValueError:
                 pass
@@ -456,6 +470,7 @@ def find_file(filename: str, search_dir: str = "."):
         search_dir: Directory to start the search from (default is current directory)
     """
     import glob
+    logger.info("[find_file] filename=%s search_dir=%s", filename, search_dir)
     
     # Make search_dir absolute relative to workspace
     workspace_path = get_workspace_path()
@@ -465,6 +480,7 @@ def find_file(filename: str, search_dir: str = "."):
     # Search for the file recursively
     pattern = os.path.join(search_dir, "**", filename)
     matches = glob.glob(pattern, recursive=True)
+    logger.info("[find_file] found %s match(es)", len(matches))
     
     if matches:
         return f"Found file(s):\n" + "\n".join(matches)
@@ -484,10 +500,12 @@ def list_dir(path: str = "."):
     Args:
         path: Directory path relative to workspace or absolute (default: workspace root)
     """
+    logger.info("[list_dir] path=%s", path)
     workspace_path = get_workspace_path()
     if not os.path.isabs(path):
         path = os.path.join(workspace_path, path) if path != "." else workspace_path
     if not os.path.exists(path):
+        logger.info("[list_dir] directory does not exist: %s", path)
         return f"❌ Directory does not exist: {path}"
     if not os.path.isdir(path):
         return f"❌ Not a directory: {path}"
@@ -495,6 +513,7 @@ def list_dir(path: str = "."):
     # Check cache first (avoids redundant filesystem reads)
     if path in _workspace_structure_cache:
         cached = _workspace_structure_cache[path]
+        logger.info("[list_dir] cache hit: path=%s entries=%s", path, len(cached) if cached else 0)
         return "Contents of " + path + " (cached):\n" + "\n".join(cached) if cached else " (empty)"
 
     try:
@@ -506,8 +525,10 @@ def list_dir(path: str = "."):
             lines.append(name + suffix)
         # Cache the result
         _workspace_structure_cache[path] = lines
+        logger.info("[list_dir] listed: path=%s entries=%s", path, len(lines))
         return "Contents of " + path + ":\n" + "\n".join(lines) if lines else " (empty)"
     except Exception as e:
+        logger.info("[list_dir] error: path=%s error=%s", path, e)
         return f"❌ Error listing directory: {str(e)}"
 
 
