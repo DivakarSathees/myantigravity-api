@@ -642,39 +642,52 @@ Confidence: {result['confidence']:.0%}
 
 @tool
 async def generate_project_description(
+    reference_description: str = "DemoDescription.md",
     output_filename: str = "PROJECT_DESCRIPTION.md"
 ) -> str:
     """
-    Generates a structured, academic, scenario-based project description.
+    Generates a comprehensive scenario-based project description by analyzing
+    solution code and test cases, using a reference description for format.
     
-    Process:
-    1. Reads ALL solution files (models, classes, methods, properties, relationships)
-    2. Reads ALL test files (extracts expected console messages, status codes, behaviors)
-    3. Detects project type (ADO.NET Console, WebAPI, generic .NET console, etc.)
-    4. Generates ONE structured description using the correct template
-    
-    The output is an exam-style problem statement sufficient for a student to
-    implement the solution and pass all tests. It contains NO syntax, NO test case
-    names, NO config details, NO assertion logic.
+    This tool will:
+    1. Explore workspace structure to identify solution and test directories
+    2. Read reference description file to learn the format
+    3. Analyze ALL solution files (classes, methods, parameters, return types)
+    4. Analyze ALL test files (test cases, coverage)
+    5. Generate NEW description for the CURRENT project following the reference format
+    6. Write to output file
     
     Args:
+        reference_description: Path to reference description file (default: DemoDescription.md)
         output_filename: Name of output file (default: PROJECT_DESCRIPTION.md)
     
     Returns:
-        Summary of what was generated
+        Summary of generated description with statistics
     """
     from description_generator import generate_project_description as do_generate
     
     workspace_path = get_workspace_path()
     
+    # Resolve reference description path
+    reference_path = None
+    if reference_description:
+        if not os.path.isabs(reference_description):
+            reference_path = os.path.join(workspace_path, reference_description)
+        else:
+            reference_path = reference_description
+        
+        if not os.path.exists(reference_path):
+            await broadcast_log(f"⚠️ Reference description not found: {reference_path}")
+            await broadcast_log(f"   Will generate description without format reference")
+            reference_path = None
+    
     await broadcast_log(f"📝 Generating project description...")
-    await broadcast_log(f"   Step 1: Reading all solution files...")
-    await broadcast_log(f"   Step 2: Reading all test files...")
-    await broadcast_log(f"   Step 3: Detecting project type and building description...")
+    if reference_path:
+        await broadcast_log(f"   Using format reference: {reference_description}")
     await broadcast_log(f"   Output file: {output_filename}")
     
     try:
-        result = do_generate(workspace_path, output_filename=output_filename)
+        result = do_generate(workspace_path, reference_path, output_filename)
         
         if result['success']:
             cache_info = result.get('cache_summary', '')
@@ -684,17 +697,23 @@ async def generate_project_description(
 
 📊 Analysis Summary:
 - Solution Files Analyzed: {len(result['solution_files'])}
+- Test Files Analyzed: {len(result['test_files'])}
 - Classes Documented: {result['classes_documented']}
 - Methods Documented: {result['methods_documented']}
+- Test Cases Documented: {result['tests_documented']}
 {f"- 📦 {cache_info}" if cache_info else ""}
 
 Solution Files:
 {chr(10).join(f"  - {f}" for f in result['solution_files'][:10])}
 {f"  ... and {len(result['solution_files']) - 10} more" if len(result['solution_files']) > 10 else ""}
 
+Test Files:
+{chr(10).join(f"  - {f}" for f in result['test_files'][:10])}
+{f"  ... and {len(result['test_files']) - 10} more" if len(result['test_files']) > 10 else ""}
+
 The description has been written to: {result['output_path']}"""
             
-            await broadcast_log(f"✅ Description generated: {result['classes_documented']} classes, {result['methods_documented']} methods")
+            await broadcast_log(f"✅ Description generated: {result['classes_documented']} classes, {result['methods_documented']} methods, {result['tests_documented']} tests")
             if cache_info:
                 await broadcast_log(f"📦 {cache_info}")
             return output
@@ -1141,8 +1160,7 @@ async def scalable_batch_review(mode: str = "FAST"):
     Returns: Summary of review results across all files.
     """
     global REVIEW_MODE
-    print("scalable_batch_review called")
-    await broadcast_log("scalable_batch_review called")
+
     effective_mode = mode.upper() if mode else REVIEW_MODE
 
     # ── 1. Collect files to review ────────────────
@@ -1454,12 +1472,12 @@ User: "Write a description for this project"
 
 You: "🎯 I understand you want me to create a project description.
 
-🤔 Thinking: I'll use the generate_project_description tool; it reads all solution and test files, detects the project type, and generates a structured academic description.
+🤔 Thinking: I'll use the generate_project_description tool; it explores the workspace and generates the description.
 
 📋 Plan:
-• Step 1 – Call generate_project_description(output_filename='PROJECT_DESCRIPTION.md')
+• Step 1 – Call generate_project_description(reference_description='DemoDescription.md', output_filename='PROJECT_DESCRIPTION.md')
 
-[Execute: generate_project_description(output_filename='PROJECT_DESCRIPTION.md')]
+[Execute: generate_project_description(reference_description='DemoDescription.md', output_filename='PROJECT_DESCRIPTION.md')]
 
 ✅ Done: Generated PROJECT_DESCRIPTION.md."
 
@@ -1824,42 +1842,55 @@ Java (JUnit):
 PROJECT DESCRIPTION GENERATION
 ====================
 
-When the user asks to "write a description", "generate documentation", "create README", or "document the project", you MUST call ONLY the generate_project_description tool. Do NOT manually read files with list_dir or manage_file — the tool handles everything.
-
-HOW IT WORKS (internal — do not explain this to the user):
-1. Reads ALL solution files (classes, properties with types, methods with params/return types, relationships)
-2. Reads ALL test files (extracts expected console messages, status codes, validation behaviors)
-3. Detects project type: ADO.NET Console, WebAPI, generic .NET console, etc.
-4. Generates a structured academic problem statement using the correct template
-5. Quality-checks the output: no syntax, no test names, no config details
-
-OUTPUT RULES (strictly enforced by the tool):
-- No code syntax, no code blocks
-- No test case names or test file names
-- No config file details
-- No mention of unit testing or assertion logic
-- Academic and exam-oriented tone
-- Sufficient detail for a student to implement and pass all tests
+When the user asks you to write a project description (e.g., "create a description for this project", "generate README", "write project documentation"), you MUST use ONLY the generate_project_description tool. Do NOT run list_dir on the workspace and then manually read solution/test files — the tool does all of that.
 
 USAGE:
-Simply call: generate_project_description(output_filename="PROJECT_DESCRIPTION.md")
+Simply call: generate_project_description(reference_description="DemoDescription.md", output_filename="PROJECT_DESCRIPTION.md")
+
+The tool will automatically:
+1. Explore workspace structure to identify solution and test directories
+2. Read reference description file (e.g., DemoDescription.md) to learn the FORMAT
+3. Analyze ALL solution files (classes, methods, parameters, return types)
+4. Analyze ALL test files (test cases, coverage)
+5. Generate NEW description for the CURRENT project following the reference format
+6. Write to output file
+
+CRITICAL: The reference description is a FORMAT TEMPLATE ONLY
+- The tool uses it to learn what sections to include and how to format
+- The tool does NOT copy content from the reference
+- The tool generates NEW content based on the CURRENT project's code
+- Result: New description with current project's details in the reference format
 
 EXAMPLE:
 User: "Write a description for this project"
 
 You: "🎯 I understand you want me to create a project description.
 
+🤔 Thinking: I'll use the generate_project_description tool to analyze the project and create a comprehensive description.
+
 📋 Plan:
-• Step 1 – Call generate_project_description(output_filename='PROJECT_DESCRIPTION.md')
+• Step 1 – Call generate_project_description tool with DemoDescription.md as format reference
+• Step 2 – Tool will analyze solution and test files
+• Step 3 – Tool will generate PROJECT_DESCRIPTION.md
 
-[Execute: generate_project_description(output_filename='PROJECT_DESCRIPTION.md')]
+[Execute: generate_project_description(reference_description='DemoDescription.md', output_filename='PROJECT_DESCRIPTION.md')]
 
-✅ Done: Generated PROJECT_DESCRIPTION.md."
+✅ Done: Generated PROJECT_DESCRIPTION.md with comprehensive documentation of all classes, methods, and test coverage."
+
+WHEN TO USE THIS TOOL:
+- User asks to "write a description"
+- User asks to "generate documentation"
+- User asks to "create README"
+- User asks to "document the project"
 
 PARAMETERS:
+- reference_description: Path to reference description file (default: "DemoDescription.md")
+  * Use this to specify which file to use as format template
+  * Can be README.md, DemoDescription.md, or any other .md file
 - output_filename: Name of output file (default: "PROJECT_DESCRIPTION.md")
+  * Specify the name of the file to generate
 
-DO NOT use list_dir + manage_file to manually discover and read files for descriptions. The tool does that internally. Call the tool only.
+DO NOT use list_dir + manage_file to manually discover and read all solution/test files when the user asks for a description. The generate_project_description tool does that internally. Call the tool only.
 
 ====================
 

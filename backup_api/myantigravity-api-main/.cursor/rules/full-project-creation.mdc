@@ -1,0 +1,103 @@
+---
+description: Project creation flow — planner creates phases, executor runs them sequentially
+alwaysApply: true
+---
+
+🔧 TASK: PROJECT CREATION — PHASE-BASED EXECUTION
+
+When the user asks to create a project, the Planner Node automatically creates a multi-phase plan.
+The system then executes each phase sequentially with automatic review + build per phase.
+
+🎯 GOAL
+
+For ANY project creation request:
+1. Planner creates a MULTI-PHASE plan (template_setup → backend → frontend → validation)
+2. Each phase executes its steps, then auto-runs review + build
+3. Build failures trigger auto-fix with up to 3 retries per phase
+4. After all phases pass → integration validation → final report
+
+EXECUTION_MODE: MULTI_PHASE
+
+🚦 CRITICAL EXECUTION RULES (MANDATORY)
+
+The system feeds you ONE STEP AT A TIME from the current phase.
+
+Execute ONLY the current step shown — do NOT jump ahead.
+
+You may make MULTIPLE tool calls for one step (e.g., read then write).
+
+When you finish ALL tool calls for a step, output a SHORT completion message:
+  "✅ Step N done: <brief>"
+This signals the system to advance to the next step automatically.
+
+DO NOT call scalable_batch_review yourself — the system runs it automatically per phase.
+DO NOT call build commands yourself — the system runs them automatically per phase.
+DO NOT list or plan future steps — the system handles sequencing.
+DO NOT wait for user confirmation between steps.
+DO NOT ask follow-up questions.
+
+⚠️ TEST CASES ARE NOT INCLUDED BY DEFAULT:
+DO NOT write test cases unless the user explicitly asks for them.
+
+📋 PHASE STRUCTURE
+
+Phase 1 — template_setup (review=OFF, build=OFF):
+  Copy template, install deps, generate components/services
+
+Phase 2 — backend_implementation (review=ON, build=ON):
+  Implement models, services, controllers
+  → Auto review + build after all steps
+
+Phase 3 — frontend_implementation (review=ON, build=ON):
+  Implement services, components, routing, CSS
+  → Auto review + build after all steps
+
+Phase 4 — integration_validation (review=OFF, build=ON):
+  Final verification of all builds
+
+📋 TEMPLATE COPY — KNOWN vs UNKNOWN
+
+For KNOWN templates, execute directly — NO discovery:
+  .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
+  .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
+  .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  Angular:       execute_terminal("cp -r angularscaffolding .")
+  Fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
+    → Contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in ONE folder.
+    → Copy ONCE — do NOT copy separate templates.
+    → Do NOT change ports: backend=8080, frontend=8081 (already configured).
+
+NPM INSTALL OPTIMIZATION:
+  npm install is automatically skipped if node_modules/ already exists.
+
+📝 FULLSTACK .NET + ANGULAR EXAMPLE
+
+Phase 1 — template_setup:
+  [Execute: cp -r dotnettemplates/dotnetangularfullstack .]
+  [Execute: cd dotnetangularfullstack/angularapp && npm install]  (skipped if node_modules exists)
+  [Generate: npx ng g c components/product-list]
+  [Generate: npx ng g s services/product]
+
+Phase 2 — backend_implementation:
+  [Write: Models/Product.cs]
+  [Write: Controllers/ProductsController.cs]
+  → Auto: batch review → dotnet build
+
+Phase 3 — frontend_implementation:
+  [Write: Angular service, components, routing, CSS]
+  → Auto: batch review → npx ng build
+
+Phase 4 — integration_validation:
+  → Auto: dotnet build + npx ng build (final check)
+
+Final Report: list what was built, how to run
+
+❗ RULES
+
+🚫 DO NOT add test cases unless user explicitly asks
+🚫 DO NOT call scalable_batch_review or build commands — system handles per phase
+🚫 DO NOT change port configuration (backend: 8080, frontend: 8081)
+🚫 DO NOT copy separate templates for fullstack .NET + Angular
+🚫 DO NOT re-discover workspace mid-run — folder structure is cached
+
+🔚 END OF PROMPT

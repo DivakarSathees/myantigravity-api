@@ -1,0 +1,7 @@
+export GOOGLE_API_KEY='AIzaSyA81VPp2xOtnYcCa_1Z1kxbMbgu9lsebvA'
+__pycache__
+venv
+reactapp
+reactapp-vite
+reactapp-vite/node_modules
+reactport

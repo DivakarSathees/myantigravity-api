@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=40.8.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pac"
+version = "0.1.0"
+description = "Pac-like console game ported from demo .NET project"
+authors = [ { name = "autogen" } ]
+readme = "README.md"
+requires-python = ">=3.8"
+
+[project.scripts]
+pac = "pac.game:main"
