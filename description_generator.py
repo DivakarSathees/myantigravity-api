@@ -524,6 +524,13 @@ PROCESS:
 3. Use the TEMPLATE provided for this project type — follow its section order and structure EXACTLY.
 4. Produce a single structured markdown description in ONE pass.
 
+EXHAUSTIVE DOCUMENTATION (MANDATORY — DO NOT OMIT ANYTHING):
+- The description MUST document EVERY public method that appears in the solution code: correct method name, parameters (names and types), return type, and behavior. Tests expect these methods to exist; if the description omits a method, the student will not implement it and tests will fail.
+- The description MUST document EVERY public property of every model/class in the solution (name, type, and brief description). Tests may assert on property names via reflection.
+- The description MUST include every console message string, menu text, prompt text, and error/success message that appears in the solution or that the tests assert on (e.g. substring checks, expected output). Use the exact strings from the code or tests.
+- Do NOT document only "sample" or "example" methods from the template. Extract and list EVERY method and property from the SOLUTION FILES and ensure every behavior/string the TEST FILES rely on is described. If the solution has 7 methods, the description must list all 7 with correct signatures and behavior.
+- Cross-check: any method or property that the test code references (e.g. GetMethod, GetProperty, expected output strings) MUST appear in the description with the same name and contract.
+
 CRITICAL OUTPUT RULES — THE DESCRIPTION MUST:
 - NOT include any code syntax, code blocks, or backticks.
 - NOT include test case names or test file names.
@@ -595,7 +602,10 @@ def _build_user_prompt(solution_files: Dict[str, str], test_files: Dict[str, str
         "\n--- END OF FILES ---\n\n"
         "Produce ONLY the final project description in markdown. "
         "Do not include any explanation, reasoning, or analysis. "
-        "Output the description directly."
+        "Output the description directly.\n\n"
+        "REMINDER: Document EVERY method and EVERY property from the solution files above, with correct names, "
+        "parameters, return types, and behavior. Include every console/API message string that the tests expect. "
+        "Omit nothing that appears in the solution or that the tests rely on."
     )
     return "".join(parts)
 
