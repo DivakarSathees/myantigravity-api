@@ -642,39 +642,74 @@ Confidence: {result['confidence']:.0%}
 
 @tool
 async def generate_project_description(
-    output_filename: str = "PROJECT_DESCRIPTION.md"
+    output_filename: str = "PROJECT_DESCRIPTION.md",
+    stack: str = "",
+    solution_paths: str = "",
+    test_paths: str = ""
 ) -> str:
     """
-    Generates a structured, academic, scenario-based project description.
-    
+    Generates a structured, academic, scenario-based project description from solution and test code.
+
+    RECOMMENDED: Before calling this tool, use list_dir to find the solution and test folders
+    (e.g. dotnetconsole/dotnetapp, dotnetconsole/nunit or dotnetwebapi/dotnetapp, dotnetwebapi/nunit).
+    Then pass those paths so the description is based on the actual files:
+    - solution_paths: JSON array of paths, e.g. ["dotnetconsole/dotnetapp"] or ["dotnetwebapi/dotnetapp"]
+    - test_paths: JSON array of paths, e.g. ["dotnetconsole/nunit"] or ["dotnetwebapi/nunit"]
+    Each path can be a folder (all code files inside are read) or a specific file. Paths are relative
+    to the workspace root. If you omit solution_paths and test_paths, the tool auto-discovers dirs
+    (which may be wrong for nested projects); passing explicit paths ensures the correct code is used.
+
     Process:
-    1. Reads ALL solution files (models, classes, methods, properties, relationships)
-    2. Reads ALL test files (extracts expected console messages, status codes, behaviors)
-    3. Detects project type (ADO.NET Console, WebAPI, generic .NET console, etc.)
-    4. Generates ONE structured description using the correct template
-    
-    The output is an exam-style problem statement sufficient for a student to
-    implement the solution and pass all tests. It contains NO syntax, NO test case
-    names, NO config details, NO assertion logic.
-    
+    1. Reads solution and test files (from provided paths or auto-discovered)
+    2. Sends their content to the description LLM
+    3. Detects project type (or uses stack override) and generates ONE structured description
+
     Args:
         output_filename: Name of output file (default: PROJECT_DESCRIPTION.md)
-    
+        stack: Optional. One of: "dotnet_webapi", "dotnet_console_ado", "dotnet_console_collection",
+               "dotnet_console", "dotnet_mvc", "generic". When empty, auto-detected.
+        solution_paths: Optional. JSON array of solution paths, e.g. ["dotnetconsole/dotnetapp"]
+        test_paths: Optional. JSON array of test paths, e.g. ["dotnetconsole/nunit"]
+
     Returns:
         Summary of what was generated
     """
     from description_generator import generate_project_description as do_generate
-    
+    import json as _json
+
     workspace_path = get_workspace_path()
-    
+
     await broadcast_log(f"📝 Generating project description...")
-    await broadcast_log(f"   Step 1: Reading all solution files...")
-    await broadcast_log(f"   Step 2: Reading all test files...")
-    await broadcast_log(f"   Step 3: Detecting project type and building description...")
+    await broadcast_log(f"   Step 1: Reading solution and test files (from provided paths or auto-discover)...")
+    await broadcast_log(f"   Step 2: Detecting project type and building description...")
     await broadcast_log(f"   Output file: {output_filename}")
-    
+
+    sol_list = None
+    tst_list = None
+    if solution_paths and solution_paths.strip():
+        try:
+            sol_list = _json.loads(solution_paths.strip())
+            if not isinstance(sol_list, list):
+                sol_list = None
+        except _json.JSONDecodeError:
+            sol_list = None
+    if test_paths and test_paths.strip():
+        try:
+            tst_list = _json.loads(test_paths.strip())
+            if not isinstance(tst_list, list):
+                tst_list = None
+        except _json.JSONDecodeError:
+            tst_list = None
+
     try:
-        result = do_generate(workspace_path, output_filename=output_filename)
+        explicit_stack = stack.strip() or None
+        result = do_generate(
+            workspace_path,
+            output_filename=output_filename,
+            stack=explicit_stack,
+            solution_paths=sol_list,
+            test_paths=tst_list,
+        )
         if result['success']:
             cache_info = result.get('cache_summary', '')
             output = f"""✅ Project description generated successfully!
@@ -1444,7 +1479,7 @@ WHY THIS IS CRITICAL:
 
 WHEN TO DO THIS (do NOT do this when user asked to edit/read/fix a specific file):
 - At the start of every new session
-- When the user asks to "write a description" (use generate_project_description tool — do not manually list_dir + read all files)
+- When the user asks to "write a description" — first list_dir to find solution and test folders, then call generate_project_description with solution_paths and test_paths (JSON arrays) so the description is based on the actual code
 - When the user asks to "analyze the project"
 - When the user asks to "generate documentation"
 - Before any task that requires understanding the project structure
@@ -1454,12 +1489,13 @@ User: "Write a description for this project"
 
 You: "🎯 I understand you want me to create a project description.
 
-🤔 Thinking: I'll use the generate_project_description tool; it reads all solution and test files, detects the project type, and generates a structured academic description.
+🤔 Thinking: I'll use list_dir to find the solution and test folders, then call generate_project_description with those paths so the description matches the actual code and tests.
 
 📋 Plan:
-• Step 1 – Call generate_project_description(output_filename='PROJECT_DESCRIPTION.md')
+• Step 1 – list_dir('.') to see workspace layout; then list_dir on any project folder (e.g. dotnetconsole or dotnetwebapi) to find dotnetapp and nunit (or src/tests)
+• Step 2 – Call generate_project_description(output_filename='PROJECT_DESCRIPTION.md', solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]') with the actual paths you found
 
-[Execute: generate_project_description(output_filename='PROJECT_DESCRIPTION.md')]
+[Execute: list_dir('.'), then list_dir('dotnetconsole'), then generate_project_description(output_filename='PROJECT_DESCRIPTION.md', solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]')]
 
 ✅ Done: Generated PROJECT_DESCRIPTION.md."
 
@@ -1824,7 +1860,9 @@ Java (JUnit):
 PROJECT DESCRIPTION GENERATION
 ====================
 
-When the user asks to "write a description", "generate documentation", "create README", or "document the project", you MUST call ONLY the generate_project_description tool. Do NOT manually read files with list_dir or manage_file — the tool handles everything.
+When the user asks to "write a description", "generate documentation", "create README", or "document the project":
+1. First use list_dir to find the solution and test folders (e.g. dotnetconsole/dotnetapp, dotnetconsole/nunit or dotnetwebapi/dotnetapp, dotnetwebapi/nunit). Paths are relative to workspace root.
+2. Then call generate_project_description with solution_paths and test_paths as JSON arrays of those paths (e.g. solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]'). This ensures the description LLM receives the actual solution and test code; omitting paths may cause wrong or empty file discovery and a description that does not match the project.
 
 HOW IT WORKS (internal — do not explain this to the user):
 1. Reads ALL solution files (classes, properties with types, methods with params/return types, relationships)
@@ -1842,7 +1880,8 @@ OUTPUT RULES (strictly enforced by the tool):
 - Sufficient detail for a student to implement and pass all tests
 
 USAGE:
-Simply call: generate_project_description(output_filename="PROJECT_DESCRIPTION.md")
+1. Use list_dir to find solution and test folders (e.g. dotnetconsole/dotnetapp, dotnetconsole/nunit).
+2. Call generate_project_description with solution_paths and test_paths as JSON arrays so the description is based on the actual code: generate_project_description(output_filename="PROJECT_DESCRIPTION.md", solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]').
 
 EXAMPLE:
 User: "Write a description for this project"
@@ -1850,16 +1889,19 @@ User: "Write a description for this project"
 You: "🎯 I understand you want me to create a project description.
 
 📋 Plan:
-• Step 1 – Call generate_project_description(output_filename='PROJECT_DESCRIPTION.md')
+• Step 1 – list_dir('.') then list_dir('dotnetconsole') to find dotnetapp and nunit
+• Step 2 – generate_project_description(output_filename='PROJECT_DESCRIPTION.md', solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]')
 
-[Execute: generate_project_description(output_filename='PROJECT_DESCRIPTION.md')]
+[Execute: list_dir('.'), list_dir('dotnetconsole'), then generate_project_description(..., solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]')]
 
 ✅ Done: Generated PROJECT_DESCRIPTION.md."
 
 PARAMETERS:
 - output_filename: Name of output file (default: "PROJECT_DESCRIPTION.md")
+- solution_paths: JSON array of solution paths, e.g. '[\"dotnetconsole/dotnetapp\"]'
+- test_paths: JSON array of test paths, e.g. '[\"dotnetconsole/nunit\"]'
 
-DO NOT use list_dir + manage_file to manually discover and read files for descriptions. The tool does that internally. Call the tool only.
+Always pass solution_paths and test_paths (from list_dir) so the tool reads the correct files and the description matches the project.
 
 ====================
 

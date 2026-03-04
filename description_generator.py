@@ -55,6 +55,13 @@ def _read_file(path: str, max_chars: int = MAX_CHARS_PER_FILE) -> str:
 
 
 def _find_solution_and_test_dirs(workspace: str):
+    """
+    Find solution and test directory paths relative to workspace.
+    When a top-level folder (e.g. dotnetwebapi) contains both solution (dotnetapp)
+    and test (nunit) subfolders, we return those subfolder paths so solution and
+    test files are read separately. Otherwise the same tree would be scanned twice
+    and test files would be omitted (treated as duplicates).
+    """
     sol_patterns = {'src', 'dotnetapp', 'lib', 'app', 'controllers', 'services', 'models'}
     test_patterns = {'test', 'tests', 'nunit', '__tests__', 'spec'}
     sol, tst = [], []
@@ -66,25 +73,31 @@ def _find_solution_and_test_dirs(workspace: str):
         if not os.path.isdir(full):
             continue
         low = item.lower()
+        # Top-level dir is clearly solution-only or test-only
         if low in test_patterns or 'test' in low or 'nunit' in low or 'spec' in low:
             tst.append(item)
         elif low in sol_patterns or low in ('data', 'exceptions'):
             sol.append(item)
         else:
-            has_sub_sol = has_sub_test = False
+            # Parent folder (e.g. dotnetwebapi): look inside for solution/test subfolders
+            sol_subs = []
+            tst_subs = []
             try:
                 for sub in os.listdir(full):
                     sl = sub.lower()
                     if sl in sol_patterns or sl in ('data', 'exceptions'):
-                        has_sub_sol = True
-                    if sl in test_patterns or 'test' in sl or 'nunit' in sl:
-                        has_sub_test = True
+                        sol_subs.append(os.path.join(item, sub))
+                    if sl in test_patterns or 'test' in sl or 'nunit' in sl or 'spec' in sl:
+                        tst_subs.append(os.path.join(item, sub))
             except OSError:
                 pass
-            if has_sub_sol:
+            if sol_subs:
+                sol.extend(sol_subs)
+            elif not tst_subs and not sol:
+                # No solution/test subfolders found; treat parent as solution root
                 sol.append(item)
-            if has_sub_test:
-                tst.append(item)
+            if tst_subs:
+                tst.extend(tst_subs)
 
     if not sol:
         sol = ['.']
@@ -420,40 +433,82 @@ You MUST produce the description in this structure (generic).
 def _detect_project_stack(workspace_path: str, solution_files: Dict[str, str]) -> str:
     """
     Detect project type from workspace structure and file content.
-    Returns one of: dotnet_webapi, dotnet_console, dotnet_console_ado, dotnet_console_collection, dotnet_mvc, generic
-    """
-    paths_lower = " ".join(p.lower() for p in solution_files.keys())
-    content_snapshot = " ".join(solution_files.values())[:15000].lower()
+    Returns one of: dotnet_webapi, dotnet_console, dotnet_console_ado,
+    dotnet_console_collection, dotnet_mvc, generic.
 
-    if "controller" in paths_lower or "controllers" in paths_lower:
-        if "mvc" in paths_lower or "viewresult" in content_snapshot or "return view(" in content_snapshot:
+    NOTE: This is heuristic-based and intentionally conservative:
+    - Only classify as .NET Web API / MVC / ADO.NET console when we see
+      clear signals (AspNetCore, DbContext, SqlConnection, SqlDataAdapter, etc.).
+    - For other stacks or ambiguous C# projects, fall back to "generic" so the
+      description uses the safe generic template instead of a wrong .NET-specific one.
+    """
+    # Quick language / file-type check
+    paths = list(solution_files.keys())
+    paths_lower = " ".join(paths).lower()
+    content_snapshot = " ".join(solution_files.values())[:20000].lower()
+
+    has_cs = any(p.lower().endswith(".cs") for p in paths)
+    has_java = any(p.lower().endswith(".java") for p in paths)
+    has_ts = any(p.lower().endswith(".ts") for p in paths)
+    has_js = any(p.lower().endswith(".js") for p in paths)
+    has_py = any(p.lower().endswith(".py") for p in paths)
+
+    # Non-.NET stacks → generic
+    if not has_cs:
+        return "generic"
+
+    # ── Detect ASP.NET Web API / MVC ─────────────────────────────────────
+    # Web API signals
+    has_aspnetcore = "microsoft.aspnetcore.mvc" in content_snapshot
+    has_apicontroller = "[apicontroller]" in content_snapshot
+    has_http_attrs = any(tag in content_snapshot for tag in ["[httpget", "[httppost", "[httpput", "[httpdelete"])
+    has_api_route = 'route("api/' in content_snapshot or 'route(" api/' in content_snapshot
+    in_controllers_folder = "controllers" in paths_lower
+
+    # MVC (views) signals
+    has_viewresult = "viewresult" in content_snapshot
+    has_return_view = "return view(" in content_snapshot
+
+    if in_controllers_folder or has_aspnetcore or has_http_attrs or has_apicontroller:
+        if has_viewresult or has_return_view:
             return "dotnet_mvc"
-        if "api" in content_snapshot or "httpget" in content_snapshot or "httppost" in content_snapshot:
-            return "dotnet_webapi"
+        # Default ASP.NET controller style to Web API when not clearly MVC
         return "dotnet_webapi"
-    # Console: distinguish ADO.NET (database) vs in-memory collection (List)
-    if "program.cs" in paths_lower:
-        has_ado = (
-            "sqldataadapter" in content_snapshot
-            or "dataset" in content_snapshot
-            or "datatable" in content_snapshot
-            or "sqlconnection" in content_snapshot
-            or "sqlcommand" in content_snapshot
-        )
-        has_collection = (
-            "list<" in content_snapshot or "list<" in content_snapshot.replace(" ", "")
-        ) and not has_ado
-        if has_ado:
-            return "dotnet_console_ado"
-        if has_collection:
-            return "dotnet_console_collection"
-        if "sql" in content_snapshot or "connectionstring" in content_snapshot:
-            return "dotnet_console_ado"
-        return "dotnet_console"
+
+    # EF Core / DbContext strongly suggests Web API / backend service
     if "dbcontext" in content_snapshot or "applicationdbcontext" in content_snapshot:
         return "dotnet_webapi"
-    if ".cs" in paths_lower:
-        return "dotnet_webapi"  # default .NET to Web API if unclear
+
+    # ── Detect Console apps (ADO.NET vs in-memory collection) ────────────
+    has_program_cs = "program.cs" in paths_lower
+    if has_program_cs:
+        # ADO.NET / database console signals
+        has_ado = any(
+            marker in content_snapshot
+            for marker in [
+                "sqldataadapter",
+                "dataset",
+                "datatable",
+                "sqlconnection",
+                "sqlcommand",
+                "system.data.sqlclient",
+                "connectionstringprovider",
+            ]
+        )
+        # Collection-based console: List<T>, Console.WriteLine, but no strong ADO markers
+        has_collection = (
+            "list<" in content_snapshot
+            or "list <" in content_snapshot
+        )
+
+        if has_ado:
+            return "dotnet_console_ado"
+        if has_collection and not has_ado:
+            return "dotnet_console_collection"
+        # Console but unclear: treat as generic console template (lighter)
+        return "dotnet_console"
+
+    # Fallback for unknown C# projects → generic description
     return "generic"
 
 
@@ -549,27 +604,55 @@ def _build_user_prompt(solution_files: Dict[str, str], test_files: Dict[str, str
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _paths_to_file_contents(workspace_path: str, paths: List[str]) -> Dict[str, str]:
+    """Build path -> content dict from a list of paths (files or dirs) relative to workspace."""
+    out: Dict[str, str] = {}
+    for p in paths:
+        p = p.strip()
+        if not p:
+            continue
+        full = os.path.join(workspace_path, p) if not os.path.isabs(p) else p
+        if not os.path.exists(full):
+            continue
+        if os.path.isfile(full):
+            if full.endswith(CODE_EXTS):
+                out[full] = _read_file(full)
+        else:
+            for fp in _walk_code_files(full):
+                out[fp] = _read_file(fp)
+    return out
+
+
 def generate_project_description(
     workspace_path: str,
     reference_description_path: Optional[str] = None,
     output_filename: str = "PROJECT_DESCRIPTION.md",
     llm=None,
+    stack: Optional[str] = None,
+    solution_paths: Optional[List[str]] = None,
+    test_paths: Optional[List[str]] = None,
 ) -> Dict:
     """
     Generate a project description using an LLM.
-    Reads all solution and test files, sends to LLM, writes the response to file.
+    Reads solution and test files (from provided paths or auto-discovered), sends to LLM, writes the response to file.
 
     Args:
         workspace_path: Root of the project.
         reference_description_path: Ignored (kept for compatibility).
         output_filename: Output file name.
         llm: Optional LangChain LLM instance. If None, creates AzureChatOpenAI from env.
+        stack: Optional explicit stack/template key. When None, auto-detected from code.
+        solution_paths: Optional list of paths (relative to workspace_path or absolute). Each can be a file or
+                       directory. If provided, only these paths are read for solution content; otherwise
+                       solution dirs are auto-discovered.
+        test_paths: Optional list of paths for test content. If provided, only these are read; otherwise
+                    test dirs are auto-discovered.
     """
     result = {
         'success': False,
         'output_path': '',
         'solution_files': [],
-        'stack': 'generic',  # dotnet_webapi | dotnet_console | dotnet_mvc | generic
+        'stack': 'generic',
         'classes_documented': 0,
         'methods_documented': 0,
         'cache_summary': '',
@@ -577,33 +660,45 @@ def generate_project_description(
     }
 
     try:
-        # 1. Discover dirs
-        solution_dirs, test_dirs = _find_solution_and_test_dirs(workspace_path)
+        # 1. Get solution and test file contents (from provided paths or auto-discover)
+        if solution_paths:
+            solution_files = _paths_to_file_contents(workspace_path, solution_paths)
+        else:
+            solution_dirs, test_dirs = _find_solution_and_test_dirs(workspace_path)
+            solution_files = {}
+            for d in solution_dirs:
+                for fp in _walk_code_files(os.path.join(workspace_path, d)):
+                    solution_files[fp] = _read_file(fp)
 
-        # 2. Read solution files
-        solution_files: Dict[str, str] = {}
-        for d in solution_dirs:
-            for fp in _walk_code_files(os.path.join(workspace_path, d)):
-                solution_files[fp] = _read_file(fp)
         result['solution_files'] = [os.path.relpath(p, workspace_path) for p in solution_files]
 
-        # 3. Read test files
-        test_files: Dict[str, str] = {}
-        for d in test_dirs:
-            for fp in _walk_code_files(os.path.join(workspace_path, d)):
-                if fp not in solution_files:
-                    test_files[fp] = _read_file(fp)
+        if test_paths:
+            test_files = _paths_to_file_contents(workspace_path, test_paths)
+            # Remove any that were already in solution (e.g. if agent passed overlapping dirs)
+            for fp in list(test_files.keys()):
+                if fp in solution_files:
+                    del test_files[fp]
+        else:
+            test_dirs = _find_solution_and_test_dirs(workspace_path)[1]
+            test_files = {}
+            for d in test_dirs:
+                for fp in _walk_code_files(os.path.join(workspace_path, d)):
+                    if fp not in solution_files:
+                        test_files[fp] = _read_file(fp)
 
         if not solution_files:
             result['errors'].append("No solution files found")
             return result
 
-        # 4. Detect stack and build stack-specific prompt
-        stack = _detect_project_stack(workspace_path, solution_files)
-        result['stack'] = stack
-        system_prompt = _build_system_prompt(stack)
-        print(system_prompt)
-        print("system_prompt")
+        # 4. Detect stack and build stack-specific prompt (allow explicit override)
+        if stack:
+            # Normalize and trust only known template keys
+            normalized = stack.strip().lower()
+            resolved_stack = normalized if normalized in DESCRIPTION_TEMPLATES else "generic"
+        else:
+            resolved_stack = _detect_project_stack(workspace_path, solution_files)
+        result['stack'] = resolved_stack
+        system_prompt = _build_system_prompt(resolved_stack)
         user_prompt = _build_user_prompt(solution_files, test_files)
         if llm is None:
             llm = _get_description_llm()
