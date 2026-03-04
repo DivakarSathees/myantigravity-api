@@ -101,22 +101,372 @@ def _get_description_llm():
     return AzureChatOpenAI(
         azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://iamneo-qb.openai.azure.com/"),
         api_key=os.getenv("AZURE_OPENAI_API_KEY", "BseWgixIxbzsRMTI9XcdwIS39aVLQT791lDu1gi3rBBFngSSOH7vJQQJ99BIACYeBjFXJ3w3AAABACOGv3VO"),
-        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini"),
+        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini"),
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
         temperature=0.2,
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STACK-SPECIFIC DESCRIPTION TEMPLATES
+# ─────────────────────────────────────────────────────────────────────────────
+# Each template defines the EXACT structure and section order the LLM must follow.
+# Use **bold** for headings/key terms; bullet points for properties/options; no code blocks.
+
+DESCRIPTION_TEMPLATES = {
+    "dotnet_webapi": """
+You MUST produce the description in EXACTLY this structure and order. Follow this template strictly.
+
+### **<ProjectTitle>**
+
+**Problem Statement:**
+**Develop a Web API project for <ProjectTitle>** using **ASP.NET Core**. <One or two sentences describing the domain and what the API manages: entities, CRUD operations, validations, exception handling.> The system should <key capabilities>. You will need to define models, controllers, and handle status codes correctly. Implement validation and exception handling for erroneous input, especially <relevant cases: missing data, invalid dates, etc.>.
+
+Your task is to implement the API based on the following requirements.
+
+**Models:**
+<Numbered list, one per model file. For each:>
+1. **<ModelName>.cs:**
+   * **<PropertyName> (<type>):** <Short description. Mention primary key, required, format, JsonIgnore if applicable.>
+   * **<PropertyName> (<type>):** ...
+   * **<NavigationProperty> (<type>?):** <Description and relationship (one-to-many, many-to-one). Mention JsonIgnore if applied.>
+
+Using **ApplicationDbContext** for <list entity names> system. **ApplicationDbContext** must be present inside the **Data** folder.
+* **Namespace - dotnetapp.Data**
+
+The **ApplicationDbContext** class acts as the primary interface between the application and the database, managing CRUD operations for <entities>. This context class defines the database schema through its DbSet properties and manages the **relationships** between entities using the Fluent API.
+
+**DbSet Properties:**
+1. **DbSet<<Entity>> <TableName>:** <What the table represents and relationship (e.g. one-to-many).>
+2. **DbSet<<Entity>> <TableName>:** ...
+
+**Implement the actual logic in the controller:**
+
+**Controllers: Namespace: dotnetapp.Controllers**
+
+**<ControllerName>**
+* **<MethodName>(<params>):** <What it does. When it returns 204/200/201/400/404, validation rules, eager loading (Include) if used.>
+* **<MethodName>(<params>):** ...
+
+**<OtherControllerName>**
+* ...
+
+**Exceptions:**
+* **<ExceptionName>** is a custom exception located in the **dotnetapp.Exceptions** folder.
+* <When it is thrown and the message.>
+
+**Endpoints:**
+**<Resource1>:**
+**GET /api/<Resource>:** <Brief description.>
+**POST /api/<Resource>:** ...
+**PUT /api/<Resource>/{id}:** ...
+
+**<Resource2>:**
+...
+
+**Status Codes and Error Handling:**
+**204 No Content:** <When returned.>
+**200 OK:** ...
+**201 Created:** ...
+**400 Bad Request:** ...
+**404 Not Found:** ...
+**<CustomException>:** <When thrown and status code (e.g. 500).>
+
+**Note:**
+* Use swagger/index to view the API output screen in 8080 port.
+* Don't delete any files in the project environment.
+* When clicking on Run Testcase button make sure that your application is running on the port 8080.
+
+**Commands to Run the Project:**
+* **cd dotnetapp** — Select the dotnet project folder
+* **dotnet restore** — Restore all required packages
+* **dotnet run** — Run the application on port 8080
+* **dotnet build** — Build and check for errors
+* **dotnet clean** — If the same error persists, clean the project and build again
+
+**For Entity Framework Core:**
+To use Entity Framework:
+Install EF:
+* **dotnet new tool-manifest**
+* **dotnet tool install --local dotnet-ef --version 6.0.6** — Then use dotnet dotnet-ef instead of dotnet-ef.
+* **dotnet dotnet-ef** — To check if EF is installed.
+* **dotnet dotnet-ef migrations add initialsetup** — Add migrations
+* **dotnet dotnet-ef database update** — Update the database
+
+**Note:**
+Use the below sample connection string to connect to MsSql Server:
+private string **connectionString** = "User ID=sa;password=examlyMssql@123; server=localhost;Database=appdb;trusted_connection=false;Persist Security Info=False;Encrypt=False"
+""",
+
+    "dotnet_console_ado": """
+You MUST produce the description in EXACTLY this structure and order (ADO.NET Console — database with SqlConnection, SqlCommand, SqlDataAdapter).
+
+**Problem Statement:** **<ProjectTitle>**
+
+**Objective:**
+You need to create the **<Entity>** table in the **appdb** database with the necessary columns. Then, develop a console-based C# application using ADO.NET to perform Create, Read, and Delete (and Update if applicable) operations on the <Entity> table in an SQL Server database. The application should enable users to <list key operations>. Implement using a combination of connected and disconnected architectures with **SqlConnection, SqlCommand,** and **SqlDataAdapter**. All classes, properties, and methods should be public.
+
+**Folder Structure:**
+<Describe or list folder structure if needed.>
+
+**Table:**
+<Table name and column definitions, or reference to database setup.>
+
+### Classes and Properties
+
+#### <Entity> Class (Models/<Entity>.cs)
+The **<Entity>** class represents a <entity> entity with the following public properties:
+* **<PropertyName> (<type>):** <Description. Mention auto-incremented/primary key if applicable.>
+* **<PropertyName> (<type>):** ...
+<Repeat for all properties.>
+
+**Database Details:**
+* Database Name: **appdb**
+* Table Name: **<TableName>**
+* Ensure that the database connection is properly established using the **ConnectionStringProvider** class in the file **Program.cs.**
+* Use the below connection string to connect to MsSql Server:
+* public static string **ConnectionString** { get; } = "User ID=sa;password=examlyMssql@123; server=localhost;Database=appdb;trusted_connection=false;Persist Security Info=False;Encrypt=False";
+
+**To Work with SQLServer:**
+(Open a New Terminal) type the below commands
+**sqlcmd -U sa**
+password: **examlyMssql@123**
+1> create database appdb
+2>go
+1>use appdb
+2>go
+1> create table TableName(columnName datatype,...)
+2> go
+1> insert into TableName values(...)
+2> go
+
+**Methods:**
+Define the following methods inside the **Program** class, located in the **Program.cs** file.
+
+For EACH method provide:
+#### N. **<MethodName>(<parameters>)**
+* <One line purpose.>
+* **Parameters**: <Description.>
+* **Architecture**: <e.g. Uses disconnected architecture with SqlDataAdapter, DataSet, and DataRow.>
+* **Access Modifier**: public
+* **Declaration Modifier**: static (if applicable)
+* **Return Type**: void (or as applicable)
+* **Console Messages**:
+* <When successful: exact message format, e.g. "Item added successfully with ID: {Id}" and line with all fields.>
+* <When not found / error: exact message, e.g. "No item found with ID {id}.">
+
+### Main Menu:
+The main menu serves as the user interface. List options exactly, e.g.:
+**<Domain> Management Menu - Enter your choice (1-5):**
+1. Add <Entity>
+2. Display All <Entities>
+3. Display <Entities> Below Minimum Stock (or similar)
+4. Delete <Entity>
+5. Exit - Terminates the application with the message "Exiting the application...".
+**Invalid choice** - Displays "Invalid choice."
+
+**Commands to Run the Project:**
+* **cd dotnetapp** — Select the dotnet project folder
+* **dotnet restore** — Restore all required packages
+* **dotnet run** — To run the application (port 8080 if applicable)
+* **dotnet build** — Build and check for errors
+* **dotnet clean** — If the same error persists, clean and build again
+* **dotnet add package package_name --version 6.0** — Install any required package (support .Net 6.0)
+
+**Note:**
+1. **Do not change the class names.**
+2. **Do not change the skeleton** (Structure of the project given).
+
+**Refer to the Sample Output:**
+**Add <Entity>:**
+**Display All <Entities>:**
+**Display <Entities> Below Minimum Stock:** (or similar)
+**Delete <Entity>:**
+**Exit:**
+**Invalid choice:**
+""",
+
+    "dotnet_console_collection": """
+You MUST produce the description in EXACTLY this structure and order (Console application using in-memory collection — List<Entity>, no database).
+
+**<ProjectTitle>**
+
+You need to develop the **<ProjectTitle>**, a console-based application in C# that <one line purpose>. Use a **List** to store and manage the collection of <entities>. Implement a menu-driven interface with options to **add, display, update, and delete** <entity> information. Ensure error handling with try-catch blocks to manage invalid data inputs, particularly using **FormatException**.
+
+**Folder Structure:**
+<Describe or list folder structure.>
+
+### Classes and Methods
+
+#### 1. <Entity> Class (Models/<Entity>.cs)
+**Purpose:** Represents an individual <entity> in the system.
+**Properties:**
+* **<PropertyName> (<type>):** <Description. Mention constraints e.g. must be positive, cannot be negative.>
+* **<PropertyName> (<type>):** ...
+**Access Modifier:** public
+
+#### 2. Program Class (Program.cs)
+**Purpose:** Acts as the entry point for the application, containing the business logic to manage <entity> records.
+
+**Properties:**
+**<collectionName> (List<<Entity>>):** A **static** collection of <Entity> objects used to manage and store <entity> records.
+**Access Modifier:** private
+
+**Methods:**
+
+**Main(string[] args):**
+Handles the application's flow through a menu-driven interface with the following options:
+1. **Add <Entity> Record:** <Brief description.>
+2. **Display <Entities>:** <Brief description.>
+3. **Update <Entity> Record:** <Brief description.>
+4. **Delete <Entity> Record:** <Brief description.>
+5. **Exit:** Terminates the application.
+Displays the message "Invalid choice." if the input is outside the range 1–5.
+
+**Add<Entity>Record(<Entity> entity):**
+Adds a new <entity> to the list if validations pass.
+* **Access Modifier:** public
+* **Declaration Modifier:** static
+* **Return Type:** void
+* Success Message: "<Entity> record added successfully."
+* Error Message: <Exact validation message from solution.>
+
+**Display<Entities>():**
+Displays all <entity> records in the list.
+* **Access Modifier:** public
+* **Declaration Modifier:** static
+* **Return Type:** void
+* Success Message: Prints each <entity>'s details in the format: "Name: {Name}, Department: {Department}, ..." (adapt to actual properties).
+* Error Message: "No <entities> in the records." (if the list is empty).
+
+**Update<Entity>Record(string oldName, <Entity> updatedEntity):** (or equivalent signature)
+Updates the details of an existing <entity> based on the provided key (e.g. name).
+* **Access Modifier:** public
+* **Declaration Modifier:** static
+* **Return Type:** void
+* Success Message: "<Entity> record updated successfully."
+* Error Message: "No matching <entity> record found."
+
+**Delete<Entity>Record(string entityName):** (or equivalent signature)
+Removes an <entity> record from the list based on the provided key.
+* **Access Modifier:** public
+* **Declaration Modifier:** static
+* **Return Type:** void
+* Success Message: "<Entity> record deleted successfully."
+* Error Message: "No matching <entity> record found."
+
+**Menu Options:**
+1. **Add <Entity> Record:** <One line.>
+2. **Display <Entities>:** <One line.>
+3. **Update <Entity> Record:** <One line.>
+4. **Delete <Entity> Record:** <One line.>
+5. **Exit:** Exits the application with the message "Exiting the application...".
+### Any invalid input results in the message: "Invalid choice."
+
+**Sample Output:**
+Add:
+Display:
+Update:
+Delete:
+Exit:
+
+**Commands to Run the Project:**
+* **cd dotnetapp** — Select the dotnet project folder
+* **dotnet run** — To run the application
+* **dotnet build** — To build and check for errors
+* **dotnet clean** — If any error persists, clean the project and build again.
+""",
+
+    "dotnet_console": """
+You MUST produce the description in this structure (ADO.NET Console — use dotnet_console_ado template structure).
+1. **Problem Statement** / **Objective**
+2. **Folder Structure** (if needed)
+3. **Table** / **Classes and Properties**
+4. **Database Details**
+5. **Methods** (full spec: parameters, return type, console messages)
+6. **Main Menu**
+7. **Commands to Run**
+8. **Notes** / **Sample Output**
+""",
+
+    "dotnet_mvc": """
+You MUST produce the description in this structure (.NET MVC).
+
+1. **Title** — Problem Statement
+2. **Problem Statement** — ASP.NET Core MVC app description
+3. **Models** — Classes and properties
+4. **Controllers** — Actions, views, routes
+5. **Views** — Pages and behavior
+6. **Endpoints / Routes**
+7. **Status Codes and Error Handling**
+8. **Commands to Run**
+9. **Notes**
+""",
+
+    "generic": """
+You MUST produce the description in this structure (generic).
+
+1. **Problem Statement**
+2. **Objective**
+3. **Classes and Properties**
+4. **Methods / Endpoints**
+5. **Expected Behavior** (console or API responses)
+6. **Commands to Run** (if applicable)
+7. **Notes**
+""",
+}
+
+
+def _detect_project_stack(workspace_path: str, solution_files: Dict[str, str]) -> str:
+    """
+    Detect project type from workspace structure and file content.
+    Returns one of: dotnet_webapi, dotnet_console, dotnet_console_ado, dotnet_console_collection, dotnet_mvc, generic
+    """
+    paths_lower = " ".join(p.lower() for p in solution_files.keys())
+    content_snapshot = " ".join(solution_files.values())[:15000].lower()
+
+    if "controller" in paths_lower or "controllers" in paths_lower:
+        if "mvc" in paths_lower or "viewresult" in content_snapshot or "return view(" in content_snapshot:
+            return "dotnet_mvc"
+        if "api" in content_snapshot or "httpget" in content_snapshot or "httppost" in content_snapshot:
+            return "dotnet_webapi"
+        return "dotnet_webapi"
+    # Console: distinguish ADO.NET (database) vs in-memory collection (List)
+    if "program.cs" in paths_lower:
+        has_ado = (
+            "sqldataadapter" in content_snapshot
+            or "dataset" in content_snapshot
+            or "datatable" in content_snapshot
+            or "sqlconnection" in content_snapshot
+            or "sqlcommand" in content_snapshot
+        )
+        has_collection = (
+            "list<" in content_snapshot or "list<" in content_snapshot.replace(" ", "")
+        ) and not has_ado
+        if has_ado:
+            return "dotnet_console_ado"
+        if has_collection:
+            return "dotnet_console_collection"
+        if "sql" in content_snapshot or "connectionstring" in content_snapshot:
+            return "dotnet_console_ado"
+        return "dotnet_console"
+    if "dbcontext" in content_snapshot or "applicationdbcontext" in content_snapshot:
+        return "dotnet_webapi"
+    if ".cs" in paths_lower:
+        return "dotnet_webapi"  # default .NET to Web API if unclear
+    return "generic"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PROMPT
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a Project Description Generator. Your task is to produce an academic, exam-style problem statement that a student can use to implement the solution and pass all tests.
+SYSTEM_PROMPT_BASE = """You are a Project Description Generator. Your task is to produce an academic, exam-style problem statement that a student can use to implement the solution and pass all tests.
 
 PROCESS:
 1. Read and understand ALL solution files (business logic, classes, methods, properties, relationships).
 2. Read and understand ALL test files (expected behavior, console messages, status codes, validations, exception handling).
-3. Infer the project type (ADO.NET Console, WebAPI, or generic).
+3. Use the TEMPLATE provided for this project type — follow its section order and structure EXACTLY.
 4. Produce a single structured markdown description in ONE pass.
 
 CRITICAL OUTPUT RULES — THE DESCRIPTION MUST:
@@ -130,54 +480,42 @@ CRITICAL OUTPUT RULES — THE DESCRIPTION MUST:
 THE DESCRIPTION MUST:
 - Be sufficient for a student to implement and pass all tests.
 - Be academic and exam-oriented.
-- Clearly define models (classes and properties).
-- Clearly define methods/endpoints (purpose, parameters, return type).
-- Clearly describe expected console messages or API responses.
-- Clearly describe validations and exception handling.
-- Follow the correct template structure based on project type.
-
-TEMPLATE — ADO.NET CONSOLE (Program.cs + SqlDataAdapter/DataSet/DataTable):
-1. Title (Problem Statement: <Domain>)
-2. Objective
-3. Folder Structure (if needed)
-4. Table Details
-5. Classes and Properties
-6. Database Details
-7. Methods (purpose, parameters, return type, console messages)
-8. Main Menu
-9. Commands to Run
-10. Notes
-
-TEMPLATE — WEB API (Controllers + DbContext + Models):
-1. Title
-2. Problem Statement
-3. Models (class properties, relationships, JsonIgnore where applicable)
-4. DbContext description (DbSet properties, relationships)
-5. Controllers and methods (purpose, HTTP method, route, status codes)
-6. Endpoints list
-7. Status Codes and Error Handling
-8. Exceptions (if any)
-9. Commands to Run
-10. Notes
-
-TEMPLATE — GENERIC:
-1. Problem Statement
-2. Objective
-3. Classes and Properties
-4. Methods
-5. Expected Behavior (console/API responses)
-6. Notes
+- Clearly define models (classes and properties with types and descriptions).
+- Clearly define controller methods (purpose, parameters, status codes, validations).
+- Clearly describe expected API responses and exception handling.
+- Follow the TEMPLATE structure for the detected project type — same headings, same order.
 
 FORMAT:
 - Use **bold** for headings and key terms.
 - Use bullet points for properties and options.
 - Describe behavior in plain language, never with code.
-- No code fences, no inline code, no syntax."""
+- No code fences, no inline code, no syntax.
+"""
+
+# Legacy single prompt (no template injection) — kept for fallback
+SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + """
+
+TEMPLATE — ADO.NET CONSOLE: Title, Objective, Folder Structure, Table Details, Classes and Properties, Database Details, Methods, Main Menu, Commands to Run, Notes.
+TEMPLATE — WEB API: Title, Problem Statement, Models, DbContext, Controllers and methods, Endpoints, Status Codes and Error Handling, Exceptions, Commands to Run, Notes.
+TEMPLATE — GENERIC: Problem Statement, Objective, Classes and Properties, Methods, Expected Behavior, Notes.
+"""
+
+
+def _build_system_prompt(stack: str) -> str:
+    """Build system prompt with the template for the detected stack."""
+    template = DESCRIPTION_TEMPLATES.get(stack, DESCRIPTION_TEMPLATES["generic"])
+    return (
+        SYSTEM_PROMPT_BASE
+        + "\n\n--- STRUCTURE TO FOLLOW (use this exact order and section names) ---\n"
+        + template
+        + "\n\n--- END TEMPLATE ---\n"
+    )
 
 
 def _build_user_prompt(solution_files: Dict[str, str], test_files: Dict[str, str]) -> str:
     parts = [
-        "Analyze the following solution and test files, then produce the project description.\n\n"
+        "Analyze the following solution and test files, then produce the project description "
+        "following the TEMPLATE structure you were given. Do not skip any section.\n\n"
         "=== SOLUTION FILES ===\n\n"
     ]
     total = 0
@@ -231,6 +569,7 @@ def generate_project_description(
         'success': False,
         'output_path': '',
         'solution_files': [],
+        'stack': 'generic',  # dotnet_webapi | dotnet_console | dotnet_mvc | generic
         'classes_documented': 0,
         'methods_documented': 0,
         'cache_summary': '',
@@ -259,13 +598,18 @@ def generate_project_description(
             result['errors'].append("No solution files found")
             return result
 
-        # 4. Build prompt and call LLM
+        # 4. Detect stack and build stack-specific prompt
+        stack = _detect_project_stack(workspace_path, solution_files)
+        result['stack'] = stack
+        system_prompt = _build_system_prompt(stack)
+        print(system_prompt)
+        print("system_prompt")
         user_prompt = _build_user_prompt(solution_files, test_files)
         if llm is None:
             llm = _get_description_llm()
 
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
         response = llm.invoke(messages)

@@ -675,6 +675,8 @@ async def generate_project_description(
     
     try:
         result = do_generate(workspace_path, output_filename=output_filename)
+        print(result)
+        print("result")
         
         if result['success']:
             cache_info = result.get('cache_summary', '')
