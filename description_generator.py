@@ -103,9 +103,9 @@ def _get_description_llm():
         api_key=os.getenv("AZURE_OPENAI_API_KEY", "BseWgixIxbzsRMTI9XcdwIS39aVLQT791lDu1gi3rBBFngSSOH7vJQQJ99BIACYeBjFXJ3w3AAABACOGv3VO"),
         azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini"),
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
-        temperature=0.2,
+        # temperature=0.2,
     )
-
+      
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STACK-SPECIFIC DESCRIPTION TEMPLATES

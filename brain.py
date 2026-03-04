@@ -675,9 +675,6 @@ async def generate_project_description(
     
     try:
         result = do_generate(workspace_path, output_filename=output_filename)
-        print(result)
-        print("result")
-        
         if result['success']:
             cache_info = result.get('cache_summary', '')
             output = f"""✅ Project description generated successfully!
@@ -702,7 +699,8 @@ The description has been written to: {result['output_path']}"""
             return output
         else:
             error_msg = f"❌ Failed to generate description:\n" + "\n".join(f"  - {e}" for e in result['errors'])
-            await broadcast_log(f"❌ Description generation failed")
+            # Broadcast detailed reasons so the UI shows more than a generic failure
+            await broadcast_log(error_msg)
             return error_msg
             
     except Exception as e:
