@@ -80,7 +80,7 @@ async def execute_terminal(command: str):
     # Get workspace path from VS Code
     workspace_path = get_workspace_path()
 
-    # ── BLOCK TEMPLATE COPY WHEN USER ASKED TO WRITE TEST CASES ──
+    # ── BLOCK TEMPLATE COPY WHEN USER ASKED TO WRITE TEST CASES OR DESCRIPTIONS ──
     stripped_cmd = command.strip()
     logger.info("[execute_terminal] Step 1: command=%s", stripped_cmd[:100] if len(stripped_cmd) > 100 else stripped_cmd)
     is_template_copy = (
@@ -95,22 +95,24 @@ async def execute_terminal(command: str):
         try:
             from utils import get_current_request_message
             msg = (get_current_request_message() or "").lower()
-            write_test_phrases = [
-                "write testcase",
-                "write test cases",
-                "add tests",
-                "generate tests",
-                "write testcases",
+            blocked_phrases = [
+                "write testcase", "write test cases", "add tests",
+                "generate tests", "write testcases",
+                "write description", "generate description", "create description",
+                "project description", "write a description", "scenario based",
+                "scenario-based", "document the project", "write documentation",
+                "generate documentation",
             ]
-            if any(phrase in msg for phrase in write_test_phrases):
-                logger.info("[execute_terminal] Step 2: BLOCKED template copy (user asked to write test cases); request_preview=%s", msg[:50])
-                await broadcast_log("⛔ Blocked: template copy is not allowed when the user asked to write test cases. The project already exists in the workspace.")
+            if any(phrase in msg for phrase in blocked_phrases):
+                reason = "write test cases" if any(p in msg for p in ["test", "tests"]) else "generate a description"
+                logger.info("[execute_terminal] Step 2: BLOCKED template copy (user asked to %s); request_preview=%s", reason, msg[:50])
+                await broadcast_log(f"⛔ Blocked: template copy is not allowed when the user asked to {reason}. The project already exists in the workspace.")
                 return (
-                    "⛔ Blocked: You must NOT copy a template when the user asked to write test cases. "
+                    f"⛔ Blocked: You must NOT copy a template when the user asked to {reason}. "
                     "The project is already in the workspace. Use list_dir to find the existing project and test folders, "
-                    "then read existing test files and write new tests there. Do not run cp -r dotnettemplates/... or cp -r templates/... ."
+                    "then work with the existing files. Do not run cp -r dotnettemplates/... or cp -r templates/... ."
                 )
-            logger.info("[execute_terminal] Step 2: template copy allowed (request not write-test-cases)")
+            logger.info("[execute_terminal] Step 2: template copy allowed (request not blocked)")
         except Exception as e:
             logger.debug("[execute_terminal] Step 2: template check exception: %s", e)
 
@@ -1860,8 +1862,12 @@ Java (JUnit):
 PROJECT DESCRIPTION GENERATION
 ====================
 
-When the user asks to "write a description", "generate documentation", "create README", or "document the project":
-1. First use list_dir to find the solution and test folders (e.g. dotnetconsole/dotnetapp, dotnetconsole/nunit or dotnetwebapi/dotnetapp, dotnetwebapi/nunit). Paths are relative to workspace root.
+When the user asks to "write a description", "generate documentation", "create README", "document the project", "scenario based description", or any variation:
+
+⛔ DO NOT COPY ANY TEMPLATE. Do NOT run cp -r dotnettemplates/... or any template copy command. The project ALREADY EXISTS in the workspace. Copying a template would OVERWRITE the user's code and destroy their project. Only use list_dir, manage_file, and generate_project_description.
+
+STEPS:
+1. First use list_dir to find the solution and test folders that already exist in the workspace (e.g. dotnetconsole/dotnetapp, dotnetconsole/nunit or dotnetwebapi/dotnetapp, dotnetwebapi/nunit). Paths are relative to workspace root.
 2. Then call generate_project_description with solution_paths and test_paths as JSON arrays of those paths (e.g. solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]'). This ensures the description LLM receives the actual solution and test code; omitting paths may cause wrong or empty file discovery and a description that does not match the project.
 
 HOW IT WORKS (internal — do not explain this to the user):
