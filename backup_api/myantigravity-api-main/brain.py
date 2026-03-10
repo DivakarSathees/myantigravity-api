@@ -50,9 +50,9 @@ async def execute_terminal(command: str):
     This is the ONLY way to run commands – all execution (run, install, create, build, test) must go through this tool.
     
     PROJECT CREATION: For KNOWN templates, copy directly without searching:
-      .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
-      .NET Console:  cp -r dotnettemplates/dotnetconsole .
-      .NET MVC:      cp -r dotnettemplates/dotnetmvc .
+      .NET Web API:  cp -r dotnettemplates/dotnetwebapi/. .
+      .NET Console:  cp -r dotnettemplates/dotnetconsole/. .
+      .NET MVC:      cp -r dotnettemplates/dotnetmvc/. .
       Angular:       cp -r dotnettemplates/angularscaffolding .
       fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
         (contains dotnetapp/ for backend and angularapp/ for frontend — ONE copy for both)
@@ -1515,7 +1515,7 @@ EXCEPTION — WRITE TEST CASES FOR EXISTING PROJECT (NO TEMPLATE COPY):
 When the user asks to "write test cases", "write testcases for this project", "add tests", or "generate tests" for the current/existing project, the project is ALREADY in the workspace.
 
 FORBIDDEN — NEVER DO THIS WHEN USER ASKED TO WRITE TEST CASES:
-- Do NOT run execute_terminal with any command that copies from a template folder. Forbidden commands include: cp -r dotnettemplates/..., cp -r templates/..., cp -r dotnettemplates/dotnetcollections ., cp -r dotnettemplates/dotnetwebapi ., cp -r dotnettemplates/dotnetconsole ., cp -r dotnettemplates/angularscaffolding ., or any similar cp/copy from template or dotnettemplates or templates.
+- Do NOT run execute_terminal with any command that copies from a template folder. Forbidden commands include: cp -r dotnettemplates/..., cp -r templates/..., cp -r dotnettemplates/dotnetcollections ., cp -r dotnettemplates/dotnetwebapi/. ., cp -r dotnettemplates/dotnetconsole/. ., cp -r dotnettemplates/angularscaffolding ., or any similar cp/copy from template or dotnettemplates or templates.
 - Copying a template into the workspace OVERWRITES the user's existing project folder and DESTROYS their code. The user already has the project (e.g. dotnetcollections or similar) in the workspace; you must ONLY add or edit test files inside that existing folder. If you run cp -r dotnettemplates/something ., you will replace the user's project with a fresh template and lose all their work.
 
 Allowed when user asked to write test cases: list_dir, manage_file (read/write), find_file, execute_terminal for dotnet test / dotnet build only (not cp). Do NOT use execute_terminal to copy any template.
@@ -1528,9 +1528,9 @@ CORE RULES (MANDATORY):
 
 0. KNOWN TEMPLATE SHORTCUTS (SKIP DISCOVERY FOR THESE):
 For known templates, execute the copy command DIRECTLY — do NOT search or discover:
-  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
   • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
   • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → This template contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in one folder.
@@ -1577,9 +1577,9 @@ STEP 1 – TEMPLATE COPY (KNOWN = DIRECT, UNKNOWN = DISCOVER FIRST)
 
 IF KNOWN TEMPLATE (.NET or Angular):
   → Execute the direct copy command immediately:
-    • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-    • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-    • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+    • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+    • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+    • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
     • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
     • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
       → One copy gives you BOTH dotnetapp/ and angularapp/. Do NOT copy separate templates.
@@ -1664,9 +1664,9 @@ Discover exact folder names with list_dir (e.g. list_dir templates/webapi). Copy
 Step 1 – COPY TEMPLATE (KNOWN = DIRECT, UNKNOWN = DISCOVER FIRST)
 
 FOR KNOWN TEMPLATES — execute directly, NO discovery needed:
-  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
   • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
   • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → ONE copy creates BOTH dotnetapp/ (backend) and angularapp/ (frontend).
@@ -2188,9 +2188,9 @@ When the user asks for scaffolding for a selected project:
 
 STEP 0 — TEMPLATE COPY (KNOWN vs UNKNOWN):
 For KNOWN templates, execute the copy command DIRECTLY — do NOT search:
-  • .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
-  • .NET Console:  cp -r dotnettemplates/dotnetconsole .
-  • .NET MVC:      cp -r dotnettemplates/dotnetmvc .
+  • .NET Web API:  cp -r dotnettemplates/dotnetwebapi/. .
+  • .NET Console:  cp -r dotnettemplates/dotnetconsole/. .
+  • .NET MVC:      cp -r dotnettemplates/dotnetmvc/. .
   • Angular:       cp -r dotnettemplates/angularscaffolding .
   • fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
     → ONE copy → both dotnetapp/ (backend) and angularapp/ (frontend).
@@ -4368,9 +4368,9 @@ DOTNET_FRAMEWORK_TEST_RULES = {
 
 TEMPLATE_COPY_COMMANDS = {
     # .NET frameworks
-    "webapi": "cp -r dotnettemplates/dotnetwebapi .",
-    "console": "cp -r dotnettemplates/dotnetconsole .",
-    "mvc": "cp -r dotnettemplates/dotnetmvc .",
+    "webapi": "cp -r dotnettemplates/dotnetwebapi/. .",
+    "console": "cp -r dotnettemplates/dotnetconsole/. .",
+    "mvc": "cp -r dotnettemplates/dotnetmvc/. .",
     # Angular template copy command
     "angular": "cp -r dotnettemplates/angularscaffolding .",
     # fullstack .NET + Angular template copy command
@@ -4420,9 +4420,9 @@ PLANNING RULES
    - Step types: "execute" (run command), "code" (write files), "generate" (ng g c/s).
 
 3. For KNOWN TEMPLATES, specify the EXACT copy command — do NOT search:
-   - .NET Web API: cp -r dotnettemplates/dotnetwebapi .
-   - .NET Console: cp -r dotnettemplates/dotnetconsole .
-   - .NET MVC: cp -r dotnettemplates/dotnetmvc .
+   - .NET Web API: cp -r dotnettemplates/dotnetwebapi/. .
+   - .NET Console: cp -r dotnettemplates/dotnetconsole/. .
+   - .NET MVC: cp -r dotnettemplates/dotnetmvc/. .
    - Angular: cp -r dotnettemplates/angularscaffolding .
    - fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
      (contains BOTH dotnetapp/ and angularapp/ — ONE copy for the entire project)

@@ -50,9 +50,9 @@ async def execute_terminal(command: str):
     This is the ONLY way to run commands – all execution (run, install, create, build, test) must go through this tool.
     
     PROJECT CREATION: For KNOWN templates, copy directly without searching:
-      .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
-      .NET Console:  cp -r dotnettemplates/dotnetconsole .
-      .NET MVC:      cp -r dotnettemplates/dotnetmvc .
+      .NET Web API:  cp -r dotnettemplates/dotnetwebapi/. .
+      .NET Console:  cp -r dotnettemplates/dotnetconsole/. .
+      .NET MVC:      cp -r dotnettemplates/dotnetmvc/. .
       Angular:       cp -r dotnettemplates/angularscaffolding .
       fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
         (contains dotnetapp/ for backend and angularapp/ for frontend — ONE copy for both)
@@ -1414,7 +1414,8 @@ AZURE_API_VERSION = "2024-12-01-preview"
 # System prompt for fully autonomous execution - think, plan, then execute
 SYSTEM_PROMPT = """You are a fully autonomous coding assistant. For EVERY user prompt you MUST think and plan first, then execute.
 
-CRITICAL: If the user asked to "write test cases" or "write testcases for this project" or "add tests", the project is ALREADY in the workspace. You must NEVER run execute_terminal with a template copy command (e.g. cp -r dotnettemplates/... or cp -r templates/...). Doing so OVERWRITES the user's project and DESTROYS their code. Only use list_dir, manage_file, find_file, and execute_terminal for dotnet test / dotnet build — never copy a template.
+CRITICAL: If the user asked to "write test cases" or "write testcases for this project" or "add tests", the project is ALREADY in the workspace. You must NEVER run execute_terminal with a template copy command (e.g. cp -r dotnettemplates/... or cp -r templates/...). Doing so OVERWRITES the user's project and DESTROYS their code. Only use list_dir, manage_file, find_file, and execute_terminal for build/test — never copy a template.
+CRITICAL (DOTNET TEST EXECUTION): For .NET template projects that include a nunit folder with run.sh (e.g. <root>/nunit/run.sh), you MUST run tests via "sh run.sh" from inside the nunit folder (or equivalent "sh nunit/run.sh"). Do NOT call "dotnet test" directly when run.sh is present, and do NOT edit run.sh. The platform relies on run.sh to orchestrate and score test cases.
 
 ====================
 MANDATORY FOR EVERY USER PROMPT: THINK AND PLAN FIRST
@@ -1535,10 +1536,10 @@ EXCEPTION — WRITE TEST CASES FOR EXISTING PROJECT (NO TEMPLATE COPY):
 When the user asks to "write test cases", "write testcases for this project", "add tests", or "generate tests" for the current/existing project, the project is ALREADY in the workspace.
 
 FORBIDDEN — NEVER DO THIS WHEN USER ASKED TO WRITE TEST CASES:
-- Do NOT run execute_terminal with any command that copies from a template folder. Forbidden commands include: cp -r dotnettemplates/..., cp -r templates/..., cp -r dotnettemplates/dotnetcollections ., cp -r dotnettemplates/dotnetwebapi ., cp -r dotnettemplates/dotnetconsole ., cp -r dotnettemplates/angularscaffolding ., or any similar cp/copy from template or dotnettemplates or templates.
+- Do NOT run execute_terminal with any command that copies from a template folder. Forbidden commands include: cp -r dotnettemplates/..., cp -r templates/..., cp -r dotnettemplates/dotnetcollections ., cp -r dotnettemplates/dotnetwebapi/. ., cp -r dotnettemplates/dotnetconsole/. ., cp -r dotnettemplates/angularscaffolding ., or any similar cp/copy from template or dotnettemplates or templates.
 - Copying a template into the workspace OVERWRITES the user's existing project folder and DESTROYS their code. The user already has the project (e.g. dotnetcollections or similar) in the workspace; you must ONLY add or edit test files inside that existing folder. If you run cp -r dotnettemplates/something ., you will replace the user's project with a fresh template and lose all their work.
 
-Allowed when user asked to write test cases: list_dir, manage_file (read/write), find_file, execute_terminal for dotnet test / dotnet build only (not cp). Do NOT use execute_terminal to copy any template.
+Allowed when user asked to write test cases: list_dir, manage_file (read/write), find_file, execute_terminal for build/test only (not cp). For .NET template projects that have a nunit/run.sh script, run tests via "sh run.sh" from the nunit folder (or "sh nunit/run.sh") instead of "dotnet test". Do NOT use execute_terminal to copy any template, and do NOT edit run.sh.
 
 Use ONLY the "WORKSPACE-AWARE TEST CASE GENERATION" workflow: list_dir to find the existing project and test folders → read existing test files with manage_file → write new tests in the existing test folder → create testcase_weightage.json → run scalable_batch_review and dotnet test (or equivalent).
 
@@ -1548,9 +1549,9 @@ CORE RULES (MANDATORY):
 
 0. KNOWN TEMPLATE SHORTCUTS (SKIP DISCOVERY FOR THESE):
 For known templates, execute the copy command DIRECTLY — do NOT search or discover:
-  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
   • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
   • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → This template contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in one folder.
@@ -1597,9 +1598,9 @@ STEP 1 – TEMPLATE COPY (KNOWN = DIRECT, UNKNOWN = DISCOVER FIRST)
 
 IF KNOWN TEMPLATE (.NET or Angular):
   → Execute the direct copy command immediately:
-    • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-    • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-    • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+    • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+    • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+    • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
     • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
     • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
       → One copy gives you BOTH dotnetapp/ and angularapp/. Do NOT copy separate templates.
@@ -1645,10 +1646,9 @@ STEP 4 – TEST CASE IMPLEMENTATION (workspace-aware, format-matching)
 STEP 5 – POST-COMPLETION: ALIGN TESTS AND .SH FILE (after solution and tests are done)
 - Once the project is complete, do the following:
   (a) Write or modify test cases to match the current project. Prefer reflection-based tests where applicable (e.g. .NET: use reflection to discover types/methods and align test names/assertions with the solution; other stacks: align test names and coverage with what was implemented).
-  (b) Read any .sh file in the copied root (e.g. run.sh). Use find_file or list_dir to locate it. If a .sh file exists:
-      - If changes are required for the current project (e.g. test names, paths, project name), modify it.
-      - CRITICAL: Do NOT change the structure or format of the .sh file. Only update values (test case names in FAILED echo lines, paths, folder names) as needed. Keep the same script layout, conditionals, and flow.
-  (c) If there is no .sh file in the copied root, leave it – do nothing. Do not create a .sh file.
+  (b) Read any .sh file in the copied root (e.g. run.sh) ONLY to understand how tests are orchestrated. Use find_file or list_dir to locate it. If a .sh file exists:
+      - CRITICAL: Do NOT edit or modify run.sh or any other .sh test runner script. The platform relies on these scripts; changing them can break scoring.
+  (c) If there is no .sh file in the copied root, leave it – do nothing. Do not create a new .sh file.
 
 ABSOLUTE RESTRICTIONS:
 - No new frameworks; no config changes; no refactoring existing code; no writing outside the copied template; no alternative folder structures.
@@ -1684,9 +1684,9 @@ Discover exact folder names with list_dir (e.g. list_dir templates/webapi). Copy
 Step 1 – COPY TEMPLATE (KNOWN = DIRECT, UNKNOWN = DISCOVER FIRST)
 
 FOR KNOWN TEMPLATES — execute directly, NO discovery needed:
-  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  • .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+  • .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+  • .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
   • Angular:       execute_terminal("cp -r dotnettemplates/angularscaffolding .")
   • fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → ONE copy creates BOTH dotnetapp/ (backend) and angularapp/ (frontend).
@@ -2205,9 +2205,9 @@ When the user asks for scaffolding for a selected project:
 
 STEP 0 — TEMPLATE COPY (KNOWN vs UNKNOWN):
 For KNOWN templates, execute the copy command DIRECTLY — do NOT search:
-  • .NET Web API:  cp -r dotnettemplates/dotnetwebapi .
-  • .NET Console:  cp -r dotnettemplates/dotnetconsole .
-  • .NET MVC:      cp -r dotnettemplates/dotnetmvc .
+  • .NET Web API:  cp -r dotnettemplates/dotnetwebapi/. .
+  • .NET Console:  cp -r dotnettemplates/dotnetconsole/. .
+  • .NET MVC:      cp -r dotnettemplates/dotnetmvc/. .
   • Angular:       cp -r dotnettemplates/angularscaffolding .
   • fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
     → ONE copy → both dotnetapp/ (backend) and angularapp/ (frontend).
@@ -2248,7 +2248,9 @@ This rule applies ALWAYS — in planned execution or normal mode:
 
 ✅ AFTER WRITING ALL TEST FILES (only if user asked for tests):
 • First, call scalable_batch_review(mode="FAST") to review ALL test files in one batch
-• THEN run the test command (dotnet test, npm test, pytest, mvn test, etc.)
+• THEN run the appropriate test command:
+  - For .NET template projects that have a nunit/run.sh script: run "sh run.sh" from the nunit folder (or "sh nunit/run.sh" from project root). Do NOT call "dotnet test" directly when run.sh exists.
+  - For other stacks: use the normal test command (e.g. npm test, pytest, mvn test, etc.)
 • If tests FAIL:
   - Read the error messages
   - Fix the failing tests or the solution code
@@ -2843,7 +2845,7 @@ Server=localhost;Database=appdb;User ID=sa;password=examlyMssql@123;trusted_conn
 
 🏗️ BUILD & RUN (AFTER MIGRATIONS SUCCEED):
    dotnet build    → must pass
-   dotnet test     → must pass
+   sh run.sh       → must pass (run from the nunit folder, or use "sh nunit/run.sh" from project root). Do NOT call dotnet test directly when run.sh exists.
    dotnet run      → verify app starts
 """
 
@@ -2880,7 +2882,7 @@ Stack detected: .NET Console — The following rules are NOW IN EFFECT.
 
 🏗️ BUILD & RUN:
    dotnet build    → must pass
-   dotnet test     → must pass
+   sh run.sh       → must pass (run from the nunit folder, or use "sh nunit/run.sh" from project root). Do NOT call dotnet test directly when run.sh exists.
    dotnet run      → verify console behavior matches requirements
 """
 
@@ -2917,7 +2919,7 @@ Stack detected: ASP.NET MVC — The following rules are NOW IN EFFECT.
 
 🏗️ BUILD & RUN:
    dotnet build    → must pass
-   dotnet test     → must pass
+   sh run.sh       → must pass (run from the nunit folder, or use "sh nunit/run.sh" from project root). Do NOT call dotnet test directly when run.sh exists.
    dotnet run      → verify MVC routes and views work
 """
 
@@ -4385,9 +4387,9 @@ DOTNET_FRAMEWORK_TEST_RULES = {
 
 TEMPLATE_COPY_COMMANDS = {
     # .NET frameworks
-    "webapi": "cp -r dotnettemplates/dotnetwebapi .",
-    "console": "cp -r dotnettemplates/dotnetconsole .",
-    "mvc": "cp -r dotnettemplates/dotnetmvc .",
+    "webapi": "cp -r dotnettemplates/dotnetwebapi/. .",
+    "console": "cp -r dotnettemplates/dotnetconsole/. .",
+    "mvc": "cp -r dotnettemplates/dotnetmvc/. .",
     # Angular template copy command
     "angular": "cp -r dotnettemplates/angularscaffolding .",
     # fullstack .NET + Angular template copy command
@@ -4437,9 +4439,9 @@ PLANNING RULES
    - Step types: "execute" (run command), "code" (write files), "generate" (ng g c/s).
 
 3. For KNOWN TEMPLATES, specify the EXACT copy command — do NOT search:
-   - .NET Web API: cp -r dotnettemplates/dotnetwebapi .
-   - .NET Console: cp -r dotnettemplates/dotnetconsole .
-   - .NET MVC: cp -r dotnettemplates/dotnetmvc .
+   - .NET Web API: cp -r dotnettemplates/dotnetwebapi/. .
+   - .NET Console: cp -r dotnettemplates/dotnetconsole/. .
+   - .NET MVC: cp -r dotnettemplates/dotnetmvc/. .
    - Angular: cp -r dotnettemplates/angularscaffolding .
    - fullstack .NET + Angular: cp -r dotnettemplates/dotnetangularfullstack .
      (contains BOTH dotnetapp/ and angularapp/ — ONE copy for the entire project)

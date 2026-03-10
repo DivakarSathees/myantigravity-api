@@ -58,9 +58,9 @@ Phase 4 — integration_validation (review=OFF, build=ON):
 📋 TEMPLATE COPY — KNOWN vs UNKNOWN
 
 For KNOWN templates, execute directly — NO discovery:
-  .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi .")
-  .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole .")
-  .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc .")
+  .NET Web API:  execute_terminal("cp -r dotnettemplates/dotnetwebapi/. .")
+  .NET Console:  execute_terminal("cp -r dotnettemplates/dotnetconsole/. .")
+  .NET MVC:      execute_terminal("cp -r dotnettemplates/dotnetmvc/. .")
   Angular:       execute_terminal("cp -r angularscaffolding .")
   Fullstack .NET + Angular: execute_terminal("cp -r dotnettemplates/dotnetangularfullstack .")
     → Contains BOTH dotnetapp/ (backend) and angularapp/ (frontend) in ONE folder.
