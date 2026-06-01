@@ -4,6 +4,8 @@ import asyncio
 import json
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+load_dotenv()  # Load .env before brain.py reads env vars
 from brain import app as agent_app  # Import your LangGraph app
 from langchain_core.messages import HumanMessage, AIMessage
 from typing import Dict, List, Optional
@@ -169,13 +171,29 @@ def debug_pending_changes():
 
 app = FastAPI()
 
-# Allow VS Code (which runs on a different port) to talk to this server
+# Allow only localhost origins (VS Code extension runs locally)
+_ALLOWED_ORIGINS = [
+    "http://localhost",
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "http://localhost:8081",
+    "http://127.0.0.1",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:8081",
+    # VS Code extension uses vscode-webview:// scheme — allow all for webview iframes
+    "vscode-webview://",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_origin_regex=r"^vscode-webview://.*$",
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# Per-session concurrency: only one agent run per session at a time
+_active_sessions: Dict[str, bool] = {}
 
 # Chat history storage (session_id -> session data)
 chat_sessions: Dict[str, dict] = {}
@@ -224,6 +242,11 @@ async def chat(request: ChatRequest):
     logger.info("[STEP 1] Chat request received: message=%s ... workspace=%s scope_path=%s",
                 (request.message or "")[:80], getattr(request, "workspace_path", ""), getattr(request, "scope_path", ""))
     
+    # Reject if this session already has a running agent
+    _pending_session_id = request.session_id
+    if _pending_session_id and _active_sessions.get(_pending_session_id):
+        return {"response": "⚠️ An agent is already running for this session. Please wait or stop it first.", "session_id": _pending_session_id}
+
     # Get or create session
     session_id, session = get_or_create_session(request.session_id)
     
@@ -295,6 +318,7 @@ async def chat(request: ChatRequest):
 
     # Allow this run to be cancelled via POST /stop-agent
     agent_cancel_flags[session_id] = False
+    _active_sessions[session_id] = True
 
     # Track current task for updates
     current_task_id = await add_progress_task("Processing", "Agent is thinking...")
@@ -448,8 +472,9 @@ async def chat(request: ChatRequest):
             set_current_request_message("")
             logger.info("[STEP 7] Agent run finished; request context cleared")
 
-        # Clear cancel flag so next run is not immediately cancelled
+        # Clear cancel flag and active session marker so next run is allowed
         agent_cancel_flags.pop(session_id, None)
+        _active_sessions.pop(session_id, None)
 
         # Mark final task as complete (unless already updated by stop)
         if not agent_stopped_by_user:
@@ -481,8 +506,24 @@ async def chat(request: ChatRequest):
             "summary_file": summary_path
         }
 
+    # Overall agent execution timeout (10 minutes); prevents infinite hangs
+    AGENT_TIMEOUT = 600  # seconds
+
+    async def run_agent_with_timeout():
+        try:
+            return await asyncio.wait_for(run_agent(), timeout=AGENT_TIMEOUT)
+        except asyncio.TimeoutError:
+            _active_sessions.pop(session_id, None)
+            await broadcast_log(f"⏱️ Agent timed out after {AGENT_TIMEOUT}s. The run was stopped automatically.")
+            return {
+                "response": f"⏱️ Agent timed out after {AGENT_TIMEOUT // 60} minutes.",
+                "session_id": session_id,
+                "session_title": session.get("title", ""),
+                "summary_file": None,
+            }
+
     # Run agent in background and stream response with keep-alive so the connection is not dropped
-    task = asyncio.create_task(run_agent())
+    task = asyncio.create_task(run_agent_with_timeout())
     KEEPALIVE_INTERVAL = 15
 
     async def stream_body():

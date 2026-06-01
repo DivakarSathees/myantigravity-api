@@ -3,12 +3,20 @@ requires = ["setuptools>=40.8.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pac"
+name = "my-antigravity"
 version = "0.1.0"
-description = "Pac-like console game ported from demo .NET project"
+description = "AI-powered coding agent and project generator"
 authors = [ { name = "autogen" } ]
 readme = "README.md"
 requires-python = ">=3.8"
+dependencies = [
+    "langchain-google-genai",
+    "langgraph",
+    "langchain-openai",
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+]
 
 [project.scripts]
-pac = "pac.game:main"
+start-server = "server:app"

@@ -111,10 +111,16 @@ def _find_solution_and_test_dirs(workspace: str):
 def _get_description_llm():
     if not _LLM_AVAILABLE:
         raise RuntimeError("langchain_openai not installed. Install with: pip install langchain-openai")
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    if not endpoint:
+        raise EnvironmentError("AZURE_OPENAI_ENDPOINT environment variable is not set.")
+    if not api_key:
+        raise EnvironmentError("AZURE_OPENAI_API_KEY environment variable is not set.")
     return AzureChatOpenAI(
-        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", "https://iamneo-qb.openai.azure.com/"),
-        api_key=os.getenv("AZURE_OPENAI_API_KEY", "BseWgixIxbzsRMTI9XcdwIS39aVLQT791lDu1gi3rBBFngSSOH7vJQQJ99BIACYeBjFXJ3w3AAABACOGv3VO"),
-        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini"),
+        azure_endpoint=endpoint,
+        api_key=api_key,
+        azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini"),
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
         # temperature=0.2,
     )
@@ -430,82 +436,92 @@ You MUST produce the description in this structure (generic).
 }
 
 
+def _strip_cs_comments(source: str) -> str:
+    """Remove // single-line and /* … */ block comments from C# source so
+    heuristic keyword matches are not tripped by commented-out code."""
+    import re
+    # Remove block comments first (non-greedy)
+    source = re.sub(r'/\*.*?\*/', ' ', source, flags=re.DOTALL)
+    # Remove single-line comments
+    source = re.sub(r'//[^\n]*', ' ', source)
+    return source
+
+
+def _count_occurrences(text: str, keywords: list) -> int:
+    """Return the total number of times any keyword appears in text."""
+    return sum(text.count(kw) for kw in keywords)
+
+
 def _detect_project_stack(workspace_path: str, solution_files: Dict[str, str]) -> str:
     """
     Detect project type from workspace structure and file content.
     Returns one of: dotnet_webapi, dotnet_console, dotnet_console_ado,
     dotnet_console_collection, dotnet_mvc, generic.
 
-    NOTE: This is heuristic-based and intentionally conservative:
-    - Only classify as .NET Web API / MVC / ADO.NET console when we see
-      clear signals (AspNetCore, DbContext, SqlConnection, SqlDataAdapter, etc.).
-    - For other stacks or ambiguous C# projects, fall back to "generic" so the
-      description uses the safe generic template instead of a wrong .NET-specific one.
+    Improvements over the old version:
+    - Strip C# comments before matching to avoid false positives from
+      commented-out code or documentation strings.
+    - Use occurrence counts (not just presence) for low-signal keywords so
+      a single mention in a comment/doc does not trigger classification.
+    - Require a minimum count threshold for weak signals.
     """
     # Quick language / file-type check
     paths = list(solution_files.keys())
     paths_lower = " ".join(paths).lower()
-    content_snapshot = " ".join(solution_files.values())[:20000].lower()
 
     has_cs = any(p.lower().endswith(".cs") for p in paths)
-    has_java = any(p.lower().endswith(".java") for p in paths)
-    has_ts = any(p.lower().endswith(".ts") for p in paths)
-    has_js = any(p.lower().endswith(".js") for p in paths)
-    has_py = any(p.lower().endswith(".py") for p in paths)
 
     # Non-.NET stacks → generic
     if not has_cs:
         return "generic"
 
+    # Build a comment-stripped content snapshot from .cs files only
+    cs_contents = [
+        _strip_cs_comments(v)
+        for k, v in solution_files.items()
+        if k.lower().endswith(".cs")
+    ]
+    code_snapshot = " ".join(cs_contents)[:30000].lower()
+
     # ── Detect ASP.NET Web API / MVC ─────────────────────────────────────
-    # Web API signals
-    has_aspnetcore = "microsoft.aspnetcore.mvc" in content_snapshot
-    has_apicontroller = "[apicontroller]" in content_snapshot
-    has_http_attrs = any(tag in content_snapshot for tag in ["[httpget", "[httppost", "[httpput", "[httpdelete"])
-    has_api_route = 'route("api/' in content_snapshot or 'route(" api/' in content_snapshot
+    has_aspnetcore = "microsoft.aspnetcore.mvc" in code_snapshot
+    has_apicontroller = "[apicontroller]" in code_snapshot
+    has_http_attrs = any(tag in code_snapshot for tag in ["[httpget", "[httppost", "[httpput", "[httpdelete"])
+    has_api_route = 'route("api/' in code_snapshot
     in_controllers_folder = "controllers" in paths_lower
 
-    # MVC (views) signals
-    has_viewresult = "viewresult" in content_snapshot
-    has_return_view = "return view(" in content_snapshot
+    # MVC (views) signals — require actual code, not just the word
+    has_viewresult = "viewresult" in code_snapshot
+    has_return_view = "return view(" in code_snapshot
 
     if in_controllers_folder or has_aspnetcore or has_http_attrs or has_apicontroller:
         if has_viewresult or has_return_view:
             return "dotnet_mvc"
-        # Default ASP.NET controller style to Web API when not clearly MVC
         return "dotnet_webapi"
 
-    # EF Core / DbContext strongly suggests Web API / backend service
-    if "dbcontext" in content_snapshot or "applicationdbcontext" in content_snapshot:
+    # EF Core / DbContext — require at least 2 occurrences to avoid false positives
+    dbcontext_count = _count_occurrences(code_snapshot, ["dbcontext", "applicationdbcontext", "dbset<"])
+    if dbcontext_count >= 2:
         return "dotnet_webapi"
 
     # ── Detect Console apps (ADO.NET vs in-memory collection) ────────────
     has_program_cs = "program.cs" in paths_lower
     if has_program_cs:
-        # ADO.NET / database console signals
-        has_ado = any(
-            marker in content_snapshot
-            for marker in [
-                "sqldataadapter",
-                "dataset",
-                "datatable",
-                "sqlconnection",
-                "sqlcommand",
-                "system.data.sqlclient",
-                "connectionstringprovider",
-            ]
-        )
-        # Collection-based console: List<T>, Console.WriteLine, but no strong ADO markers
-        has_collection = (
-            "list<" in content_snapshot
-            or "list <" in content_snapshot
-        )
+        # ADO.NET / database console signals — require at least 2 occurrences
+        ado_count = _count_occurrences(code_snapshot, [
+            "sqldataadapter", "dataset", "datatable",
+            "sqlconnection", "sqlcommand",
+            "system.data.sqlclient", "connectionstringprovider",
+        ])
+        has_ado = ado_count >= 2
+
+        # Collection-based console: List<T> usage
+        has_collection = _count_occurrences(code_snapshot, ["list<", "list <"]) >= 1
 
         if has_ado:
             return "dotnet_console_ado"
         if has_collection and not has_ado:
             return "dotnet_console_collection"
-        # Console but unclear: treat as generic console template (lighter)
         return "dotnet_console"
 
     # Fallback for unknown C# projects → generic description
@@ -563,15 +579,39 @@ TEMPLATE — GENERIC: Problem Statement, Objective, Classes and Properties, Meth
 """
 
 
-def _build_system_prompt(stack: str) -> str:
+def _build_system_prompt(stack: str, scaffolding_mode: bool = False) -> str:
     """Build system prompt with the template for the detected stack."""
     template = DESCRIPTION_TEMPLATES.get(stack, DESCRIPTION_TEMPLATES["generic"])
-    return (
+    prompt = (
         SYSTEM_PROMPT_BASE
         + "\n\n--- STRUCTURE TO FOLLOW (use this exact order and section names) ---\n"
         + template
         + "\n\n--- END TEMPLATE ---\n"
     )
+    if scaffolding_mode:
+        prompt += """
+--- SCAFFOLDING CONTEXT (IMPORTANT) ---
+The solution files shown are SCAFFOLDING FILES — this is what students already have in
+their workspace. The scaffolding contains:
+  • Class and namespace declarations (predefined — students do NOT create these)
+  • Model class properties / auto-properties (predefined)
+  • Static field declarations, e.g. List<T> collections (predefined)
+  • Method SIGNATURES with "// TODO: Implement this method" bodies (students implement these)
+  • Test files (predefined — students must make them pass, not write them)
+
+RULES for writing the description from scaffolding:
+1. For anything ALREADY in the scaffolding (non-TODO code): say "use the existing ..." or
+   "the [X] is already defined in the scaffolding — do not modify it".
+2. For methods marked "// TODO: Implement this method": describe what the student must
+   implement (purpose, parameters, return type, expected console output, validations).
+3. Do NOT ask students to create the project structure, model files, or field declarations
+   that are already provided.
+4. Do NOT ask students to write test cases (they are predefined).
+5. The description must be sufficient for a student to implement only the TODO methods
+   and pass all tests.
+--- END SCAFFOLDING CONTEXT ---
+"""
+    return prompt
 
 
 def _build_user_prompt(solution_files: Dict[str, str], test_files: Dict[str, str]) -> str:
@@ -641,22 +681,27 @@ def generate_project_description(
     stack: Optional[str] = None,
     solution_paths: Optional[List[str]] = None,
     test_paths: Optional[List[str]] = None,
+    scaffolding_mode: bool = False,
 ) -> Dict:
     """
     Generate a project description using an LLM.
     Reads solution and test files (from provided paths or auto-discovered), sends to LLM, writes the response to file.
 
     Args:
-        workspace_path: Root of the project.
+        workspace_path            : Root of the project.
         reference_description_path: Ignored (kept for compatibility).
-        output_filename: Output file name.
-        llm: Optional LangChain LLM instance. If None, creates AzureChatOpenAI from env.
-        stack: Optional explicit stack/template key. When None, auto-detected from code.
-        solution_paths: Optional list of paths (relative to workspace_path or absolute). Each can be a file or
-                       directory. If provided, only these paths are read for solution content; otherwise
-                       solution dirs are auto-discovered.
-        test_paths: Optional list of paths for test content. If provided, only these are read; otherwise
-                    test dirs are auto-discovered.
+        output_filename           : Output file name.
+        llm                       : Optional LangChain LLM instance. If None, creates AzureChatOpenAI from env.
+        stack                     : Optional explicit stack/template key. When None, auto-detected from code.
+        solution_paths            : Optional list of paths (relative to workspace_path or absolute). Each can be a
+                                    file or directory. If provided, only these paths are read for solution content;
+                                    otherwise solution dirs are auto-discovered.
+        test_paths                : Optional list of paths for test content. If provided, only these are read;
+                                    otherwise test dirs are auto-discovered.
+        scaffolding_mode          : When True, solution_paths are expected to point to scaffolding files (already
+                                    stripped to boilerplate). The system prompt gains extra rules telling the LLM
+                                    to refer to predefined code as "use the existing …" and only ask students to
+                                    implement TODO methods.
     """
     result = {
         'success': False,
@@ -708,7 +753,7 @@ def generate_project_description(
         else:
             resolved_stack = _detect_project_stack(workspace_path, solution_files)
         result['stack'] = resolved_stack
-        system_prompt = _build_system_prompt(resolved_stack)
+        system_prompt = _build_system_prompt(resolved_stack, scaffolding_mode=scaffolding_mode)
         user_prompt = _build_user_prompt(solution_files, test_files)
         if llm is None:
             llm = _get_description_llm()

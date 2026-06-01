@@ -80,7 +80,10 @@ async def execute_terminal(command: str):
     # Get workspace path from VS Code
     workspace_path = get_workspace_path()
 
-    # ── BLOCK TEMPLATE COPY WHEN USER ASKED TO WRITE TEST CASES OR DESCRIPTIONS ──
+    # ── BLOCK TEMPLATE COPY WHEN A PROJECT ALREADY EXISTS IN WORKSPACE ──
+    # Ground truth: check the filesystem, not the user's message text.
+    # A template copy is only valid when the workspace is empty (no existing project).
+    # This mirrors how Cursor / Claude Code behave — they trust workspace state.
     stripped_cmd = command.strip()
     logger.info("[execute_terminal] Step 1: command=%s", stripped_cmd[:100] if len(stripped_cmd) > 100 else stripped_cmd)
     is_template_copy = (
@@ -93,31 +96,84 @@ async def execute_terminal(command: str):
     )
     if is_template_copy:
         try:
-            from utils import get_current_request_message
-            msg = (get_current_request_message() or "").lower()
-            blocked_phrases = [
-                "write testcase", "write test cases", "add tests",
-                "generate tests", "write testcases",
-                "write description", "generate description", "create description",
-                "project description", "write a description", "scenario based",
-                "scenario-based", "document the project", "write documentation",
-                "generate documentation",
+            # Directories that are part of the agent/templates infrastructure — NOT user projects
+            _INFRA_DIRS = {
+                "dotnettemplates", "templates", "template", "angularscaffolding",
+                "venv", ".venv", "node_modules", ".git", ".cursor",
+                ".neuralstack_logs", "__pycache__", ".idea", ".vscode",
+                "extension-builder", "backup_api",
+            }
+            # Presence of any of these inside workspace = a real project already exists
+            _PROJECT_SIGNALS = [
+                # .NET
+                "dotnetapp",
+                "nunit",
+                # Angular / Node
+                "angularapp",
+                # Generic indicators (checked as files below)
             ]
-            if any(phrase in msg for phrase in blocked_phrases):
-                reason = "write test cases" if any(p in msg for p in ["test", "tests"]) else "generate a description"
-                logger.info("[execute_terminal] Step 2: BLOCKED template copy (user asked to %s); request_preview=%s", reason, msg[:50])
-                await broadcast_log(f"⛔ Blocked: template copy is not allowed when the user asked to {reason}. The project already exists in the workspace.")
-                return (
-                    f"⛔ Blocked: You must NOT copy a template when the user asked to {reason}. "
-                    "The project is already in the workspace. Use list_dir to find the existing project and test folders, "
-                    "then work with the existing files. Do not run cp -r dotnettemplates/... or cp -r templates/... ."
+
+            project_exists = False
+            project_evidence = ""
+
+            # 1. Fast check: known project folder names at workspace root
+            for signal in _PROJECT_SIGNALS:
+                signal_path = os.path.join(workspace_path, signal)
+                if os.path.isdir(signal_path):
+                    project_exists = True
+                    project_evidence = f"folder '{signal}/' exists"
+                    break
+
+            # 2. Slower check: scan one level deep for .csproj / angular.json / solution files
+            #    Skip infrastructure dirs to avoid false positives from templates themselves.
+            if not project_exists:
+                try:
+                    for entry in os.scandir(workspace_path):
+                        if entry.name in _INFRA_DIRS:
+                            continue
+                        if entry.is_file():
+                            low = entry.name.lower()
+                            if low.endswith(".csproj") or low.endswith(".sln") or low == "angular.json":
+                                project_exists = True
+                                project_evidence = f"file '{entry.name}' exists at workspace root"
+                                break
+                        elif entry.is_dir():
+                            # One level deeper: look for .csproj inside non-infra sub-dirs
+                            try:
+                                for sub in os.scandir(entry.path):
+                                    if sub.is_file() and sub.name.lower().endswith(".csproj"):
+                                        project_exists = True
+                                        project_evidence = f"file '{entry.name}/{sub.name}' exists"
+                                        break
+                            except OSError:
+                                pass
+                        if project_exists:
+                            break
+                except OSError:
+                    pass
+
+            if project_exists:
+                logger.info(
+                    "[execute_terminal] Step 2: BLOCKED template copy — project already exists (%s)",
+                    project_evidence,
                 )
-            logger.info("[execute_terminal] Step 2: template copy allowed (request not blocked)")
+                await broadcast_log(
+                    f"⛔ Blocked template copy — project already exists in workspace ({project_evidence}). "
+                    "Working with existing files."
+                )
+                return (
+                    f"⛔ Blocked: A project already exists in the workspace ({project_evidence}). "
+                    "Do NOT run cp -r dotnettemplates/... or cp -r templates/... — that would overwrite the user's code. "
+                    "Use list_dir to explore the existing project and work with its files directly."
+                )
+
+            logger.info("[execute_terminal] Step 2: workspace is clean — template copy allowed")
         except Exception as e:
-            logger.debug("[execute_terminal] Step 2: template check exception: %s", e)
+            logger.debug("[execute_terminal] Step 2: workspace check exception: %s", e)
 
     # ── NPM INSTALL OPTIMIZATION ──
-    # Skip npm install if node_modules already exists in the target directory
+    # Skip npm install only when node_modules is up-to-date with package.json/package-lock.json.
+    # A stale/partial node_modules (e.g. interrupted install) must NOT be skipped.
     if "npm install" in stripped_cmd or "npm i" in stripped_cmd:
         # Extract the working directory from `cd <dir> && npm install` pattern
         npm_dir = workspace_path
@@ -132,10 +188,23 @@ async def execute_terminal(command: str):
                     else:
                         npm_dir = os.path.join(workspace_path, cd_target)
         node_modules_path = os.path.join(npm_dir, "node_modules")
+        pkg_json = os.path.join(npm_dir, "package.json")
+        pkg_lock = os.path.join(npm_dir, "package-lock.json")
         if os.path.isdir(node_modules_path):
-            logger.info("[execute_terminal] Step 3: npm install SKIPPED (node_modules exists)")
-            await broadcast_log(f"⏭️ npm install SKIPPED — node_modules already exists in {npm_dir}")
-            return f"✅ npm install skipped (node_modules already exists in {npm_dir})"
+            # Only skip if the lockfile (or package.json) is OLDER than node_modules
+            # — meaning nothing changed since the last successful install.
+            nm_mtime = os.path.getmtime(node_modules_path)
+            manifest_mtime = max(
+                os.path.getmtime(pkg_lock) if os.path.exists(pkg_lock) else 0,
+                os.path.getmtime(pkg_json) if os.path.exists(pkg_json) else 0,
+            )
+            if manifest_mtime <= nm_mtime:
+                logger.info("[execute_terminal] Step 3: npm install SKIPPED (node_modules up-to-date)")
+                await broadcast_log(f"⏭️ npm install SKIPPED — node_modules is up-to-date in {npm_dir}")
+                return f"✅ npm install skipped (node_modules is up-to-date in {npm_dir})"
+            else:
+                logger.info("[execute_terminal] Step 3: npm install REQUIRED (package.json/lock newer than node_modules)")
+                await broadcast_log(f"📦 package.json changed — running npm install in {npm_dir}")
 
     logger.info("[execute_terminal] Step 4: running command in workspace=%s", workspace_path)
     await broadcast_log(f"▶️ Executing: {command}")
@@ -303,7 +372,16 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
         original_path = path
         if not os.path.isabs(path):
             path = os.path.join(workspace_path, path)
-        
+
+        # ── PATH TRAVERSAL GUARD ──
+        # Resolve symlinks/.. so an attacker cannot escape the workspace
+        resolved_path = os.path.realpath(os.path.abspath(path))
+        resolved_workspace = os.path.realpath(os.path.abspath(workspace_path))
+        if not resolved_path.startswith(resolved_workspace + os.sep) and resolved_path != resolved_workspace:
+            logger.warning("[manage_file] BLOCKED path traversal attempt: path=%s workspace=%s", resolved_path, resolved_workspace)
+            return f"❌ Error: Access denied — path '{original_path}' is outside the workspace."
+        path = resolved_path
+
         file_name = os.path.basename(path)
         logger.info("[manage_file] Step 2: resolved path=%s", path)
         
@@ -351,9 +429,21 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 ))
                 diff_text = '\n'.join(diff_lines)
                 
-                # APPLY THE CHANGE DIRECTLY
-                with open(path, "w") as f:
-                    f.write(content)
+                # APPLY THE CHANGE DIRECTLY (retry up to 3 times on transient OS errors)
+                _write_success = False
+                for _attempt in range(3):
+                    try:
+                        with open(path, "w") as f:
+                            f.write(content)
+                        _write_success = True
+                        break
+                    except OSError as _we:
+                        if _attempt < 2:
+                            import time as _t; _t.sleep(0.3)
+                        else:
+                            return f"❌ Error: could not write '{path}' after 3 attempts: {_we}"
+                if not _write_success:
+                    return f"❌ Error: write failed for '{path}'"
                 
                 # Store for tracking and potential revert
                 from utils import store_applied_change, notify_applied_change, broadcast_applied_change
@@ -388,9 +478,17 @@ async def manage_file(path: str, content: str = None, action: str = "write"):
                 if dir_path and not os.path.exists(dir_path):
                     os.makedirs(dir_path, exist_ok=True)
                 
-                # CREATE THE FILE DIRECTLY
-                with open(path, "w") as f:
-                    f.write(content)
+                # CREATE THE FILE DIRECTLY (retry up to 3 times on transient OS errors)
+                for _attempt in range(3):
+                    try:
+                        with open(path, "w") as f:
+                            f.write(content)
+                        break
+                    except OSError as _we:
+                        if _attempt < 2:
+                            import time as _t; _t.sleep(0.3)
+                        else:
+                            return f"❌ Error: could not create '{path}' after 3 attempts: {_we}"
                 
                 # Store for tracking
                 from utils import store_applied_change, broadcast_applied_change
@@ -478,7 +576,14 @@ def find_file(filename: str, search_dir: str = "."):
     workspace_path = get_workspace_path()
     if not os.path.isabs(search_dir):
         search_dir = os.path.join(workspace_path, search_dir) if search_dir != "." else workspace_path
-    
+
+    # PATH TRAVERSAL GUARD
+    resolved_search = os.path.realpath(os.path.abspath(search_dir))
+    resolved_workspace = os.path.realpath(os.path.abspath(workspace_path))
+    if not resolved_search.startswith(resolved_workspace + os.sep) and resolved_search != resolved_workspace:
+        return f"❌ Error: Access denied — search_dir '{search_dir}' is outside the workspace."
+    search_dir = resolved_search
+
     # Search for the file recursively
     pattern = os.path.join(search_dir, "**", filename)
     matches = glob.glob(pattern, recursive=True)
@@ -506,17 +611,36 @@ def list_dir(path: str = "."):
     workspace_path = get_workspace_path()
     if not os.path.isabs(path):
         path = os.path.join(workspace_path, path) if path != "." else workspace_path
+
+    # PATH TRAVERSAL GUARD
+    resolved_list = os.path.realpath(os.path.abspath(path))
+    resolved_ws = os.path.realpath(os.path.abspath(workspace_path))
+    if not resolved_list.startswith(resolved_ws + os.sep) and resolved_list != resolved_ws:
+        return f"❌ Error: Access denied — path '{path}' is outside the workspace."
+    path = resolved_list
+
     if not os.path.exists(path):
         logger.info("[list_dir] directory does not exist: %s", path)
         return f"❌ Directory does not exist: {path}"
     if not os.path.isdir(path):
         return f"❌ Not a directory: {path}"
 
-    # Check cache first (avoids redundant filesystem reads)
+    import time as _time
+    # Check cache with TTL — also drop entries whose files no longer exist on disk
+    now = _time.time()
     if path in _workspace_structure_cache:
-        cached = _workspace_structure_cache[path]
-        logger.info("[list_dir] cache hit: path=%s entries=%s", path, len(cached) if cached else 0)
-        return "Contents of " + path + " (cached):\n" + "\n".join(cached) if cached else " (empty)"
+        age = now - _workspace_structure_cache_ts.get(path, 0)
+        if age < _WORKSPACE_CACHE_TTL:
+            cached = _workspace_structure_cache[path]
+            # Filter out entries that were deleted externally
+            valid = [e for e in cached if os.path.exists(os.path.join(path, e.rstrip("/")))]
+            if len(valid) == len(cached):
+                logger.info("[list_dir] cache hit: path=%s entries=%s", path, len(cached))
+                return "Contents of " + path + " (cached):\n" + "\n".join(cached) if cached else "(empty)"
+            # Some entries gone — fall through to refresh
+            logger.info("[list_dir] cache stale (deleted files): path=%s refreshing", path)
+        else:
+            logger.info("[list_dir] cache expired (age=%.1fs): path=%s refreshing", age, path)
 
     try:
         entries = sorted(os.listdir(path))
@@ -525,67 +649,64 @@ def list_dir(path: str = "."):
             full = os.path.join(path, name)
             suffix = "/" if os.path.isdir(full) else ""
             lines.append(name + suffix)
-        # Cache the result
+        # Cache the result with timestamp
         _workspace_structure_cache[path] = lines
+        _workspace_structure_cache_ts[path] = now
         logger.info("[list_dir] listed: path=%s entries=%s", path, len(lines))
-        return "Contents of " + path + ":\n" + "\n".join(lines) if lines else " (empty)"
+        return "Contents of " + path + ":\n" + "\n".join(lines) if lines else "(empty)"
     except Exception as e:
         logger.info("[list_dir] error: path=%s error=%s", path, e)
         return f"❌ Error listing directory: {str(e)}"
 
 
 @tool
-async def create_scaffolding(template_path: str, project_name: str, scaffold_tests: bool = False):
+async def create_scaffolding(project_name: str = "", scaffold_tests: bool = False):
     """
-    Creates scaffolding from a template by copying the template structure and replacing 
-    solution code with TODOs, while keeping infrastructure files intact.
-    
-    THIS IS THE ONLY WAY TO CREATE SCAFFOLDING. Do not manually edit solution files.
-    
+    Creates a student-ready scaffolding from the COMPLETED project in the workspace.
+
+    THIS IS THE ONLY WAY TO CREATE SCAFFOLDING. Do not manually copy or edit files.
+
+    The completed project (solution code + test cases) must already exist in the workspace.
+    This tool:
+      1. Reads every solution file (dotnetapp/, src/, app/, etc.)
+      2. Strips method/constructor bodies → replaces with // TODO: Implement this method
+      3. Keeps model class structures, field declarations, and auto-properties intact
+      4. Copies all test files VERBATIM (tests are never modified)
+      5. Copies infrastructure files verbatim (.csproj, .sln, run.sh, .json, etc.)
+      6. Writes the result to workspace/scaffolding/ (or workspace/scaffolding/<project_name>/)
+
     Args:
-        template_path: Path to the template folder (e.g., 'templates/webapi' or 'template/ado')
-        project_name: Name for the scaffolded project (will be created under 'scaffolding/' folder)
-        scaffold_tests: If True, also scaffold test files; if False, keep tests as-is (default: False)
-    
-    Workflow:
-    1. Creates scaffolding/<project_name>/ folder
-    2. Copies entire template structure to scaffolding folder
-    3. Scans for solution files (.cs, .py, .java, .js, .ts, etc.)
-    4. Replaces implementation code with TODO comments
-    5. Keeps infrastructure files (package.json, *.csproj, run.sh, configs) intact
-    6. Optionally scaffolds test files too
-    
-    Returns: Summary of scaffolded files and any errors
+        project_name  : Optional subfolder name inside 'scaffolding/'. Leave empty to place
+                        scaffolding directly under 'scaffolding/'.
+        scaffold_tests: If True, also strip test file bodies. Default False — tests are
+                        always kept as-is so the test suite remains runnable.
+
+    After scaffolding is created, call generate_project_description(use_scaffolding=True)
+    to produce a description aligned with what students see in the scaffolding.
+
+    Returns: Summary of scaffolded and copied files, plus next-step guidance.
     """
     from scaffolding_generator import create_scaffolding as do_scaffold, get_scaffolding_summary
-    
+
     workspace_path = get_workspace_path()
-    
-    # Resolve template path
-    if not os.path.isabs(template_path):
-        template_path = os.path.join(workspace_path, template_path)
-    
-    # Scaffolding output path
-    scaffolding_base = os.path.join(workspace_path, "scaffolding")
-    
-    await broadcast_log(f"🏗️ Creating scaffolding for: {project_name}")
-    await broadcast_log(f"📂 From template: {template_path}")
-    await broadcast_log(f"📁 Output: {scaffolding_base}/{project_name}")
-    
-    # Run scaffolding generation
-    result = do_scaffold(template_path, scaffolding_base, project_name, scaffold_tests)
-    
+    scaffolding_base = workspace_path  # scaffolding/ will be created inside workspace
+
+    await broadcast_log(f"🏗️ Creating scaffolding from completed workspace...")
+    await broadcast_log(f"📁 Output: {os.path.join(scaffolding_base, 'scaffolding', project_name or '').rstrip('/')}")
+
+    result = do_scaffold(workspace_path, scaffolding_base, project_name, scaffold_tests)
     summary = get_scaffolding_summary(result)
-    
+
     if result['success']:
         await broadcast_log(f"✅ Scaffolding created: {result['output_path']}")
-        await broadcast_log(f"   📝 {len(result['scaffolded_files'])} files scaffolded with TODOs")
-        await broadcast_log(f"   📋 {len(result['copied_files'])} files copied as-is")
+        await broadcast_log(f"   📝 {len(result['scaffolded_files'])} solution files stripped to boilerplate")
+        await broadcast_log(f"   📋 {len(result['copied_files'])} files copied verbatim (tests + infra)")
+        await broadcast_log(f"   💡 Run generate_project_description(use_scaffolding=True) to align the description")
     else:
         await broadcast_log(f"❌ Scaffolding failed")
         for error in result['errors']:
             await broadcast_log(f"   ❌ {error}")
-    
+
     return summary
 
 
@@ -647,7 +768,8 @@ async def generate_project_description(
     output_filename: str = "PROJECT_DESCRIPTION.md",
     stack: str = "",
     solution_paths: str = "",
-    test_paths: str = ""
+    test_paths: str = "",
+    use_scaffolding: bool = False,
 ) -> str:
     """
     Generates a structured, academic, scenario-based project description from solution and test code.
@@ -661,17 +783,26 @@ async def generate_project_description(
     to the workspace root. If you omit solution_paths and test_paths, the tool auto-discovers dirs
     (which may be wrong for nested projects); passing explicit paths ensures the correct code is used.
 
+    SCAFFOLDING-ALIGNED DESCRIPTION:
+    When use_scaffolding=True, the description is generated from the scaffolding files instead of
+    the full solution. This ensures the description tells students to IMPLEMENT the TODO methods
+    and refers to predefined code (class structure, field declarations) as "use the existing ...".
+    Always call create_scaffolding() before calling this with use_scaffolding=True.
+
     Process:
-    1. Reads solution and test files (from provided paths or auto-discovered)
+    1. Reads solution/scaffolding and test files (from provided paths or auto-discovered)
     2. Sends their content to the description LLM
     3. Detects project type (or uses stack override) and generates ONE structured description
 
     Args:
-        output_filename: Name of output file (default: PROJECT_DESCRIPTION.md)
-        stack: Optional. One of: "dotnet_webapi", "dotnet_console_ado", "dotnet_console_collection",
-               "dotnet_console", "dotnet_mvc", "generic". When empty, auto-detected.
-        solution_paths: Optional. JSON array of solution paths, e.g. ["dotnetconsole/dotnetapp"]
-        test_paths: Optional. JSON array of test paths, e.g. ["dotnetconsole/nunit"]
+        output_filename : Name of output file (default: PROJECT_DESCRIPTION.md)
+        stack           : Optional. One of: "dotnet_webapi", "dotnet_console_ado",
+                          "dotnet_console_collection", "dotnet_console", "dotnet_mvc", "generic".
+                          When empty, auto-detected.
+        solution_paths  : Optional. JSON array of solution paths, e.g. ["dotnetconsole/dotnetapp"]
+        test_paths      : Optional. JSON array of test paths, e.g. ["dotnetconsole/nunit"]
+        use_scaffolding : When True, reads scaffolding/ files instead of full solution so the
+                          description aligns with the student-facing boilerplate. Default False.
 
     Returns:
         Summary of what was generated
@@ -681,8 +812,47 @@ async def generate_project_description(
 
     workspace_path = get_workspace_path()
 
-    await broadcast_log(f"📝 Generating project description...")
-    await broadcast_log(f"   Step 1: Reading solution and test files (from provided paths or auto-discover)...")
+    # ── Resolve scaffolding paths when use_scaffolding=True ─────────────────
+    scaffolding_dir = os.path.join(workspace_path, "scaffolding")
+    if use_scaffolding and os.path.isdir(scaffolding_dir):
+        await broadcast_log(f"📝 Generating scaffolding-aligned project description...")
+        await broadcast_log(f"   Using scaffolding files from: scaffolding/")
+        # Override solution_paths to point at the scaffolding folder
+        # (test_paths stays as-is — tests are copied verbatim into scaffolding too)
+        if not solution_paths or not solution_paths.strip():
+            # Auto-discover solution dirs INSIDE the scaffolding folder
+            try:
+                scaffold_sol_dirs = [
+                    os.path.join("scaffolding", d)
+                    for d in os.listdir(scaffolding_dir)
+                    if os.path.isdir(os.path.join(scaffolding_dir, d))
+                    and not any(t in d.lower() for t in ('test', 'nunit', 'spec'))
+                ]
+                if scaffold_sol_dirs:
+                    solution_paths = _json.dumps(scaffold_sol_dirs)
+                    await broadcast_log(f"   Solution paths (scaffolding): {solution_paths}")
+            except OSError:
+                pass
+        if not test_paths or not test_paths.strip():
+            # Auto-discover test dirs INSIDE the scaffolding folder
+            try:
+                scaffold_test_dirs = [
+                    os.path.join("scaffolding", d)
+                    for d in os.listdir(scaffolding_dir)
+                    if os.path.isdir(os.path.join(scaffolding_dir, d))
+                    and any(t in d.lower() for t in ('test', 'nunit', 'spec'))
+                ]
+                if scaffold_test_dirs:
+                    test_paths = _json.dumps(scaffold_test_dirs)
+                    await broadcast_log(f"   Test paths (scaffolding): {test_paths}")
+            except OSError:
+                pass
+    else:
+        if use_scaffolding:
+            await broadcast_log(f"⚠️ use_scaffolding=True but scaffolding/ not found — using full solution instead")
+        await broadcast_log(f"📝 Generating project description...")
+        await broadcast_log(f"   Step 1: Reading solution and test files (from provided paths or auto-discover)...")
+
     await broadcast_log(f"   Step 2: Detecting project type and building description...")
     await broadcast_log(f"   Output file: {output_filename}")
 
@@ -711,6 +881,7 @@ async def generate_project_description(
             stack=explicit_stack,
             solution_paths=sol_list,
             test_paths=tst_list,
+            scaffolding_mode=use_scaffolding and os.path.isdir(scaffolding_dir),
         )
         if result['success']:
             cache_info = result.get('cache_summary', '')
@@ -756,7 +927,9 @@ _modified_files: set = set()      # absolute paths of files written since last r
 _review_cache: dict = {}          # path → sha256 hex of last-reviewed content
 REVIEW_MODE = "FAST"              # "FAST" (default) or "STRICT"
 _phase_created_files: set = set()  # files created/modified in the CURRENT phase (reset per phase)
-_workspace_structure_cache: dict = {}  # dir_path → list of entries (avoids repeated list_dir calls)
+_workspace_structure_cache: dict = {}        # dir_path → list of entries
+_workspace_structure_cache_ts: dict = {}     # dir_path → float (time.time() when cached)
+_WORKSPACE_CACHE_TTL = 30.0                  # seconds before a cached listing expires
 # File content cache: path → content (and (path, "_mtime") → mtime for change detection).
 # - When we create or write a file, we store its content and mtime here (session-long).
 # - On read: if cache has the path and mtime matches the file's current mtime, return cache.
@@ -800,6 +973,7 @@ def _track_modified_file(abs_path: str, content: str):
     # Invalidate workspace structure cache for this file's directory
     parent_dir = os.path.dirname(abs_path)
     _workspace_structure_cache.pop(parent_dir, None)
+    _workspace_structure_cache_ts.pop(parent_dir, None)
 
 
 def _update_file_content_cache(abs_path: str, content: str):
@@ -1389,20 +1563,21 @@ class State(TypedDict):
 # -------------------------------------------------
 # 3. Azure OpenAI Configuration
 # -------------------------------------------------
-AZURE_ENDPOINT = os.getenv(
-    "AZURE_OPENAI_ENDPOINT",
-    "https://iamneo-qb.openai.azure.com/"
-)
+AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+if not AZURE_ENDPOINT:
+    raise EnvironmentError(
+        "AZURE_OPENAI_ENDPOINT environment variable is not set. "
+        "Set it before starting the server."
+    )
 
-AZURE_API_KEY = os.getenv(
-    "AZURE_OPENAI_API_KEY",
-    "BseWgixIxbzsRMTI9XcdwIS39aVLQT791lDu1gi3rBBFngSSOH7vJQQJ99BIACYeBjFXJ3w3AAABACOGv3VO"
-)
+AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+if not AZURE_API_KEY:
+    raise EnvironmentError(
+        "AZURE_OPENAI_API_KEY environment variable is not set. "
+        "Set it before starting the server."
+    )
 
-AZURE_DEPLOYMENT = os.getenv(
-    "AZURE_OPENAI_DEPLOYMENT",
-    "gpt-5-mini"
-)
+AZURE_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
 
 AZURE_API_VERSION = "2024-12-01-preview"
 
@@ -1501,6 +1676,49 @@ You: "🎯 I understand you want me to create a project description.
 [Execute: list_dir('.'), then list_dir('dotnetconsole'), then generate_project_description(output_filename='PROJECT_DESCRIPTION.md', solution_paths='[\"dotnetconsole/dotnetapp\"]', test_paths='[\"dotnetconsole/nunit\"]')]
 
 ✅ Done: Generated PROJECT_DESCRIPTION.md."
+
+====================
+SCAFFOLDING WORKFLOW (when user asks to create scaffolding)
+====================
+
+Scaffolding = a student-facing version of the project with method bodies removed (replaced with
+// TODO: Implement this method) but with test cases, model structures, and field declarations kept intact.
+
+WHEN to create scaffolding:
+- User says "create scaffolding", "create the scaffolding", "make the scaffolding", "generate scaffolding"
+- After a project is fully built and tests pass
+
+SCAFFOLDING CREATION STEPS (always in this order):
+1. Verify the project is complete: list_dir('.') to confirm dotnetapp/ and nunit/ exist with code
+2. Call create_scaffolding() — this reads the completed project and produces scaffolding/ folder
+3. Call generate_project_description(use_scaffolding=True) — this generates a description aligned
+   with the scaffolding (tells students to implement TODO methods, mentions predefined code)
+
+EXAMPLE:
+User: "Create scaffolding for this project"
+
+You: "🎯 I understand you want me to create a student-facing scaffolding.
+
+🤔 Thinking: First I'll verify the project is complete, then create the scaffolding (which strips
+method bodies to TODO), then generate a description aligned with the scaffolding so students
+know what to implement vs what's already provided.
+
+📋 Plan:
+• Step 1 – list_dir('.') to confirm project folders exist
+• Step 2 – create_scaffolding() to produce scaffolding/ folder from the completed workspace
+• Step 3 – generate_project_description(use_scaffolding=True) to write a description aligned
+           with the scaffolding
+
+[Execute the steps above]
+
+✅ Done: scaffolding/ created and PROJECT_DESCRIPTION.md generated."
+
+DESCRIPTION ALIGNMENT RULES (when use_scaffolding=True):
+- The description is generated FROM the scaffolding files (what students see), not the full solution
+- For predefined code in scaffolding (class structure, fields, model properties): say "use the existing X"
+- For methods with // TODO comments: describe what the student must implement (inputs, outputs, validations)
+- Never ask students to create files, folders, or code that is already in the scaffolding
+- Never mention test file names, NUnit, or assertion details in the description
 
 ====================
 
@@ -4745,6 +4963,7 @@ def planner_node(state: State):
     # Reset phase tracking globals
     _phase_created_files.clear()
     _workspace_structure_cache.clear()
+    _workspace_structure_cache_ts.clear()
 
     # Return plan as AIMessage so agent can see it, and initialize phase state
     plan_summary = f"[TASK PLAN]\n{plan_json}"

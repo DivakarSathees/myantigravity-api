@@ -4,4 +4,4 @@ venv
 reactapp
 reactapp-vite
 reactapp-vite/node_modules
-reactport
+reactport.env
